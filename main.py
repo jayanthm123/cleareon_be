@@ -1,11 +1,27 @@
+import psycopg2
 from flask import Flask, request, jsonify
 import imaplib
 import email
+from psycopg2 import sql
+from datetime import datetime
 from email.header import decode_header
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
+
+
+# Database connection
+def get_db_connection():
+    conn = psycopg2.connect(
+        host="pg-3c0f63d9-cleareon.l.aivencloud.com",
+        database="cleareon_db",
+        user="avnadmin",
+        password="AVNS_mPoJaHeUZxZjg-eWQ_p",
+        port="22635",
+        sslmode="require"
+    )
+    return conn
 
 
 def clean(text):
@@ -79,6 +95,66 @@ def fetch_emails():
         imap.logout()
 
         return jsonify(response)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/store_email_template', methods=['POST'])
+def create_template():
+    try:
+        # Get JSON data from the request
+        data = request.get_json()
+        name = data['name']
+        subject = data['subject']
+        content = data['content']
+
+        # Validate the required fields
+        if not name or not subject or not content:
+            return jsonify({"error": "All fields (name, subject, content) are required"}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = sql.SQL("INSERT INTO email_templates (name, subject, content, created_at) VALUES (%s, %s, %s, %s)")
+        cursor.execute(query, (name, subject, content, datetime.now()))
+        conn.commit()
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Template created successfully!"}), 201
+
+    except Exception as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/fetch_email_templates', methods=['GET'])
+def fetch_email_templates():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query to fetch all email templates
+        cursor.execute("SELECT id, name, subject, content FROM email_templates")
+        templates = cursor.fetchall()
+
+        # Format the data into a dictionary
+        templates_data = []
+        for template in templates:
+            templates_data.append({
+                'id': template[0],
+                'name': template[1],
+                'subject': template[2],
+                'content': template[3]
+            })
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify(templates_data), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
