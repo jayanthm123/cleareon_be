@@ -97,6 +97,7 @@ def fetch_emails():
         return jsonify(response)
 
     except Exception as e:
+        print(str(e))
         return jsonify({"error": str(e)}), 500
 
 
@@ -155,6 +156,119 @@ def fetch_email_templates():
         conn.close()
 
         return jsonify(templates_data), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Update email template route
+@app.route('/update_email_template/<int:id>', methods=['PUT'])
+def update_email_template(id):
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        subject = data.get('subject')
+        content = data.get('content')
+
+        # Validate the required fields
+        if not name and not subject and not content:
+            return jsonify({"error": "At least one of the fields (name, subject, content) must be provided to update"}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Create dynamic SQL update query
+        update_fields = []
+        update_values = []
+
+        if name:
+            update_fields.append(sql.SQL("name = %s"))
+            update_values.append(name)
+        if subject:
+            update_fields.append(sql.SQL("subject = %s"))
+            update_values.append(subject)
+        if content:
+            update_fields.append(sql.SQL("content = %s"))
+            update_values.append(content)
+
+        # Add id to the values for the WHERE clause
+        update_values.append(id)
+
+        query = sql.SQL("UPDATE email_templates SET {} WHERE id = %s").format(sql.SQL(", ").join(update_fields))
+
+        cursor.execute(query, update_values)
+        conn.commit()
+
+        # Check if any row was updated
+        if cursor.rowcount == 0:
+            return jsonify({"error": "Template not found"}), 404
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Template updated successfully!"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/store_distribution_list', methods=['POST'])
+def store_distribution_list():
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        emails = data.get('emails')
+        ccEmails = data.get('ccEmails')
+
+
+        # Validate the required fields
+        if not name or not emails or not isinstance(emails, list):
+            return jsonify({"error": "Name and a list of emails are required"}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = sql.SQL("INSERT INTO distribution_lists (name, emails, ccEmails, created_at) VALUES (%s, %s, %s, %s) RETURNING id")
+        cursor.execute(query, (name, emails, ccEmails, datetime.now()))
+        new_id = cursor.fetchone()[0]
+        conn.commit()
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Distribution list created successfully!", "id": new_id, "name": name, "emails": emails, "ccEmails": ccEmails}), 201
+
+    except Exception as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 500
+
+# New route to fetch all distribution lists
+@app.route('/fetch_distribution_lists', methods=['GET'])
+def fetch_distribution_lists():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query to fetch all distribution lists
+        cursor.execute("SELECT id, name, emails ,ccEmails FROM distribution_lists")
+        lists = cursor.fetchall()
+
+        # Format the data into a dictionary
+        lists_data = []
+        for list_item in lists:
+            lists_data.append({
+                'id': list_item[0],
+                'name': list_item[1],
+                'emails': list_item[2],
+                'ccEmails': list_item[3]
+            })
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify(lists_data), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
