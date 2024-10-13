@@ -1,3 +1,4 @@
+import smtplib
 import psycopg2
 from flask import Flask, request, jsonify
 import imaplib
@@ -6,6 +7,10 @@ from psycopg2 import sql
 from datetime import datetime
 from email.header import decode_header
 from flask_cors import CORS
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -172,7 +177,8 @@ def update_email_template(id):
 
         # Validate the required fields
         if not name and not subject and not content:
-            return jsonify({"error": "At least one of the fields (name, subject, content) must be provided to update"}), 400
+            return jsonify(
+                {"error": "At least one of the fields (name, subject, content) must be provided to update"}), 400
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -221,14 +227,14 @@ def store_distribution_list():
         emails = data.get('emails')
         ccEmails = data.get('ccEmails')
 
-
         # Validate the required fields
         if not name or not emails or not isinstance(emails, list):
             return jsonify({"error": "Name and a list of emails are required"}), 400
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        query = sql.SQL("INSERT INTO distribution_lists (name, emails, ccEmails, created_at) VALUES (%s, %s, %s, %s) RETURNING id")
+        query = sql.SQL(
+            "INSERT INTO distribution_lists (name, emails, ccEmails, created_at) VALUES (%s, %s, %s, %s) RETURNING id")
         cursor.execute(query, (name, emails, ccEmails, datetime.now()))
         new_id = cursor.fetchone()[0]
         conn.commit()
@@ -237,11 +243,14 @@ def store_distribution_list():
         cursor.close()
         conn.close()
 
-        return jsonify({"message": "Distribution list created successfully!", "id": new_id, "name": name, "emails": emails, "ccEmails": ccEmails}), 201
+        return jsonify(
+            {"message": "Distribution list created successfully!", "id": new_id, "name": name, "emails": emails,
+             "ccEmails": ccEmails}), 201
 
     except Exception as e:
         print(str(e))
         return jsonify({"error": str(e)}), 500
+
 
 # New route to fetch all distribution lists
 @app.route('/fetch_distribution_lists', methods=['GET'])
@@ -273,6 +282,158 @@ def fetch_distribution_lists():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/update_distribution_list/<int:id>', methods=['PUT'])
+def update_distribution_list(id):
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        emails = data.get('emails')
+        ccEmails = data.get('ccEmails')
+
+        # Validate the required fields
+        if not name and not emails and not ccEmails:
+            return jsonify(
+                {"error": "At least one of the fields (name, emails, ccEmails) must be provided to update"}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Create dynamic SQL update query
+        update_fields = []
+        update_values = []
+
+        if name:
+            update_fields.append(sql.SQL("name = %s"))
+            update_values.append(name)
+        if emails:
+            update_fields.append(sql.SQL("emails = %s"))
+            update_values.append(emails)
+        if ccEmails:
+            update_fields.append(sql.SQL("ccEmails = %s"))
+            update_values.append(ccEmails)
+
+        # Add id to the values for the WHERE clause
+        update_values.append(id)
+
+        query = sql.SQL("UPDATE distribution_lists SET {} WHERE id = %s").format(sql.SQL(", ").join(update_fields))
+
+        cursor.execute(query, update_values)
+        conn.commit()
+
+        # Check if any row was updated
+        if cursor.rowcount == 0:
+            return jsonify({"error": "Distribution list not found"}), 404
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Distribution list updated successfully!"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/send_email', methods=['POST'])
+def send_email():
+    try:
+        data = request.get_json()
+        subject = data.get('subject')
+        body = data.get('body')
+        sender_email = data.get('sender_email')
+        sender_password = data.get('sender_password')
+        distribution_list_id = data.get('distribution_list_id')
+        attachments = data.get('attachments', [])  # List of file paths
+
+        # Validate required fields
+        if not all([subject, body, sender_email, sender_password, distribution_list_id]):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        # Fetch the distribution list
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, emails, ccEmails FROM distribution_lists WHERE id = %s", (distribution_list_id,))
+        result = cursor.fetchone()
+        if not result:
+            return jsonify({"error": "Distribution list not found"}), 404
+
+        distribution_name, to_emails, cc_emails = result
+
+        # Create the email
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = ', '.join(to_emails)
+        if cc_emails:
+            msg['Cc'] = ', '.join(cc_emails)
+        msg['Subject'] = subject
+
+        # Attach the body
+        msg.attach(MIMEText(body, 'html'))
+
+        # Attach files
+        for attachment in attachments:
+            with open(attachment, "rb") as file:
+                part = MIMEApplication(file.read(), Name=os.path.basename(attachment))
+            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment)}"'
+            msg.attach(part)
+
+        # Send the email
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:  # Adjust SMTP server as needed
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+
+        # Insert record into inquiry_details table
+        insert_query = """
+        INSERT INTO inquiry_details (sent_on, subject, distribution_name, responses_received)
+        VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(insert_query, (datetime.now(), subject, distribution_name, 0))
+        conn.commit()
+
+        return jsonify({"message": "Email sent successfully and inquiry details recorded!"}), 200
+
+    except Exception as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+
+@app.route('/fetch_freight_inquiries', methods=['GET'])
+def fetch_freight_inquiries():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query to fetch all distribution lists
+        cursor.execute("select id, sent_on, subject, distribution_name, sent_to, responses_received,lowest_quote from inquiry_details")
+        lists = cursor.fetchall()
+
+        # Format the data into a dictionary
+        lists_data = []
+        for list_item in lists:
+            lists_data.append({
+                'id': list_item[0],
+                'sent_on': list_item[1],
+                'subject': list_item[2],
+                'distribution_name': list_item[3],
+                'sent_to': list_item[4],
+                'responses_received': list_item[5],
+                'lowest_quote': list_item[6]
+            })
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify(lists_data), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
