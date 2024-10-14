@@ -283,6 +283,112 @@ def fetch_distribution_lists():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/store_new_inquiry', methods=['POST'])
+def store_new_inquiry():
+    try:
+        data = request.get_json()
+        subject = data.get('subject')
+        body = data.get('body')
+        sender_email = data.get('sender_email')
+        mail_content = data.get('mail_content')
+        distribution_list_id = data.get('distribution_list_id')
+
+        # Validate required fields
+        if not all([subject, body, sender_email, distribution_list_id]):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        # Fetch the distribution list
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, emails, ccEmails FROM distribution_lists WHERE id = %s", (distribution_list_id,))
+        result = cursor.fetchone()
+        if not result:
+            return jsonify({"error": "Distribution list not found"}), 404
+
+        distribution_name, to_emails, cc_emails = result
+        # Calculate the number of email addresses in the TO list
+        # to_emails_list = to_emails.split(",")
+        total_to_emails = len(to_emails)
+
+        # Insert record into inquiry_details table
+        insert_query = """
+        INSERT INTO inquiry_details (sent_on, subject, distribution_name, mail_content, responses_received,Status, sent_to)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+        cursor.execute(insert_query,
+                       (datetime.now(), subject, distribution_name, mail_content, 0, "Pending", str(total_to_emails)))
+        new_inquiry_id = cursor.fetchone()[0]
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Inquiry stored successfully!",
+            "inquiry_id": new_inquiry_id
+        }), 200
+
+    except Exception as e:
+        print(f"Error in store_new_inquiry: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/update_inquiry_status/<int:id>', methods=['PUT'])
+def update_inquiry_status(id):
+    try:
+        data = request.get_json()
+        new_status = data.get('status')
+        responses_received = data.get('responses_received')
+        lowest_quote = data.get('lowest_quote')
+
+        # Validate required fields
+        if not new_status:
+            return jsonify({"error": "New status is required"}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Create dynamic SQL update query
+        update_fields = [sql.SQL("status = %s")]
+        update_values = [new_status]
+
+        if responses_received is not None:
+            update_fields.append(sql.SQL("responses_received = %s"))
+            update_values.append(responses_received)
+
+        if lowest_quote is not None:
+            update_fields.append(sql.SQL("lowest_quote = %s"))
+            update_values.append(lowest_quote)
+
+        # Add id to the values for the WHERE clause
+        update_values.append(id)
+
+        query = sql.SQL("UPDATE inquiry_details SET {} WHERE id = %s RETURNING id").format(sql.SQL(", ").join(update_fields))
+
+        cursor.execute(query, update_values)
+        updated_id = cursor.fetchone()
+        conn.commit()
+
+        # Check if any row was updated
+        if not updated_id:
+            return jsonify({"error": "Inquiry not found"}), 404
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Inquiry status updated successfully!",
+            "inquiry_id": updated_id[0],
+            "new_status": new_status
+        }), 200
+
+    except Exception as e:
+        print(f"Error in update_inquiry_status: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/update_distribution_list/<int:id>', methods=['PUT'])
 def update_distribution_list(id):
     try:
@@ -383,24 +489,11 @@ def send_email():
             server.login(sender_email, sender_password)
             server.send_message(msg)
 
-        # Insert record into inquiry_details table
-        insert_query = """
-        INSERT INTO inquiry_details (sent_on, subject, distribution_name, responses_received)
-        VALUES (%s, %s, %s, %s)
-        """
-        cursor.execute(insert_query, (datetime.now(), subject, distribution_name, 0))
-        conn.commit()
-
-        return jsonify({"message": "Email sent successfully and inquiry details recorded!"}), 200
+        return jsonify({"message": "Email sent successfully!"}), 200
 
     except Exception as e:
         print(str(e))
         return jsonify({"error": str(e)}), 500
-
-    finally:
-        if conn:
-            cursor.close()
-            conn.close()
 
 
 @app.route('/fetch_freight_inquiries', methods=['GET'])
@@ -410,7 +503,8 @@ def fetch_freight_inquiries():
         cursor = conn.cursor()
 
         # Query to fetch all distribution lists
-        cursor.execute("select id, sent_on, subject, distribution_name, sent_to, responses_received,lowest_quote from inquiry_details")
+        cursor.execute(
+            "select id, sent_on, subject, distribution_name, sent_to, responses_received,lowest_quote, status from inquiry_details")
         lists = cursor.fetchall()
 
         # Format the data into a dictionary
@@ -423,7 +517,8 @@ def fetch_freight_inquiries():
                 'distribution_name': list_item[3],
                 'sent_to': list_item[4],
                 'responses_received': list_item[5],
-                'lowest_quote': list_item[6]
+                'lowest_quote': list_item[6],
+                'status': list_item[7]
             })
 
         # Close the connection
@@ -434,6 +529,7 @@ def fetch_freight_inquiries():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
