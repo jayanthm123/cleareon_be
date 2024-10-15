@@ -20,3 +20,13 @@ CREATE TABLE inquiry_details (
     lowest_quote DECIMAL(10, 2),
 	mail_content TEXT
 );
+
+CREATE TABLE IF NOT EXISTS failed_emails (
+    id SERIAL PRIMARY KEY,
+    inquiry_id INTEGER NOT NULL,
+    tried_on TIMESTAMP NOT NULL,
+    subject TEXT NOT NULL,
+    to_email TEXT NOT NULL,
+    cc TEXT,
+    mail_content TEXT NOT NULL
+);
