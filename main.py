@@ -5,7 +5,8 @@ import psycopg2
 from flask import Flask, request, jsonify
 import imaplib
 import email
-
+from email.policy import default
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask.cli import load_dotenv
 from psycopg2 import sql
 from datetime import datetime
@@ -25,6 +26,10 @@ app = Flask(__name__)
 CORS(app)
 
 
+def my_scheduled_job():
+    # Your task logic here
+    print("Scheduled function is running every 10 minutes")
+
 # Database connection
 def get_db_connection():
     conn = psycopg2.connect(
@@ -36,83 +41,6 @@ def get_db_connection():
         sslmode="require"
     )
     return conn
-
-
-def clean(text):
-    # Clean text for creating a folder
-    return "".join(c if c.isalnum() else "_" for c in text)
-
-
-@app.route('/fetch_emails', methods=['POST'])
-def fetch_emails():
-    data = request.json
-    email_address = data.get('email')
-    password = data.get('password')
-    imap_server = data.get('imap_server')
-
-    if not email_address or not password or not imap_server:
-        return jsonify({"error": "Missing required fields"}), 400
-
-    try:
-        # Create an IMAP4 client authenticated with SSL
-        imap = imaplib.IMAP4_SSL(imap_server)
-
-        # Authenticate
-        imap.login(email_address, password)
-
-        # Select the mailbox you want to read from
-        imap.select("INBOX")
-
-        # Search for emails
-        _, message_numbers = imap.search(None, "ALL")
-
-        # Prepare the response structure
-        response = {"inboxItems": []}
-
-        for num in message_numbers[0].split()[:10]:  # Limit to 10 emails
-            _, msg_data = imap.fetch(num, "(RFC822)")
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    email_body = response_part[1]
-                    email_message = email.message_from_bytes(email_body)
-
-                    # Decode the email subject
-                    subject, encoding = decode_header(email_message["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
-
-                    # Get the sender
-                    from_ = email_message.get("From")
-
-                    # Get the received date
-                    received_date = email_message.get('Date')
-
-                    # Get the email body
-                    if email_message.is_multipart():
-                        for part in email_message.walk():
-                            if part.get_content_type() == "text/plain":
-                                body = part.get_payload(decode=True).decode()
-                                break
-                    else:
-                        body = email_message.get_payload(decode=True).decode()
-
-                    # Add email details to the response structure
-                    response["inboxItems"].append({
-                        'subject': subject,
-                        'sender': from_,
-                        'body': body,
-                        'receivedDate': received_date
-                    })
-
-        # Close the connection
-        imap.close()
-        imap.logout()
-
-        return jsonify(response)
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/store_email_template', methods=['POST'])
@@ -321,10 +249,10 @@ def store_new_inquiry():
 
         # Insert record into inquiry_details table
         insert_query = """
-        INSERT INTO inquiry_details (sent_on, subject, distribution_name, mail_content, responses_received,Status, sent_to)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """
+            INSERT INTO inquiry_details (sent_on, subject, distribution_name, mail_content, responses_received,Status, sent_to)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """
         cursor.execute(insert_query,
                        (datetime.now(), subject, distribution_name, mail_content, 0, "Pending", str(total_to_emails)))
         new_inquiry_id = cursor.fetchone()[0]
@@ -584,7 +512,6 @@ def send_email():
                 send_success = False
                 for attempt in range(3):  # 3 attempts: initial + 2 retries
                     try:
-
                         server.send_message(msg, to_addrs=recipients)
                         send_success = True
                         message_id = msg['Message-ID']
@@ -752,6 +679,7 @@ def fetch_and_store_emails():
         imap = imaplib.IMAP4_SSL(imap_server)
         imap.login(email_address, password)
         imap.select('INBOX')
+        print(imap.capabilities)
 
         last_refresh = get_client_config('default', 'default', 'last_refresh_datetime')
         last_refresh = datetime.fromisoformat(last_refresh)
@@ -832,10 +760,116 @@ def update_config():
 
         update_client_config(client_id, client_account_id, config_key, config_value)
         return jsonify({"message": "Configuration updated successfully"}), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+def monitor_mailbox():
+    try:
+        print("Starting")
+        data = request.json
+        email_address = 'cleareontestmailbox@gmail.com'
+        password = 'awiqwxcxapuaxdxl'
+        imap_server = 'imap.gmail.com'
+
+        # Connect to the IMAP server
+        imap = imaplib.IMAP4_SSL(imap_server)
+        imap.login(email_address, password)
+        imap.select('INBOX')
+        print(imap.capabilities)
+
+        # Store the last refresh datetime
+        last_refresh = get_client_config('default', 'default', 'last_refresh_datetime')
+        last_refresh = datetime.fromisoformat(last_refresh)
+
+        # Function to process new messages
+        def process_new_messages():
+            search_criterion = f'(SINCE "{last_refresh.strftime("%d-%b-%Y")}")'
+            _, messages = imap.search(None, search_criterion)
+
+            conn = get_db_connection()
+            cur = conn.cursor()
+            ctr = 0
+
+            for num in messages[0].split():
+                _, msg_data = imap.fetch(num, '(RFC822)')
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        ctr += 1
+                        msg = email.message_from_bytes(response_part[1], policy=default)
+                        email_data = parse_email(msg)
+
+                        cur.execute(""" 
+                            INSERT INTO processed_emails 
+                            (message_id, subject, sender, recipient, cc, bcc, received_date, body_text, body_html, headers, attachments, folder) 
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                            ON CONFLICT (message_id) DO NOTHING
+                        """, (
+                            email_data['message_id'],
+                            email_data['subject'],
+                            email_data['sender'],
+                            email_data['recipient'],
+                            email_data['cc'],
+                            email_data['bcc'],
+                            email_data['received_date'],
+                            email_data['body_text'],
+                            email_data['body_html'],
+                            Json(email_data['headers']),
+                            Json(email_data['attachments']),
+                            'INBOX'
+                        ))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return ctr
+
+        # Continuous monitoring using IDLE
+        while True:
+            # Start the IDLE command
+            imap.idle()
+            print("Waiting for new emails...")
+
+            # Wait for new mail notifications
+            while True:
+                try:
+                    # Wait for an email to arrive
+                    imap.idle_check(timeout=300)  # 5-minute timeout
+                    new_email_count = process_new_messages()
+                    if new_email_count > 0:
+                        print(f"{new_email_count} new emails processed")
+                        # Update last refresh datetime
+                        update_client_config('default', 'default', 'last_refresh_datetime',
+                                             datetime.now(timezone.utc).isoformat())
+                except imaplib.IMAP4.error as idle_error:
+                    print(f"Error during IDLE: {idle_error}")
+                    break  # Break the inner loop to re-establish IDLE
+
+            # Re-establish IDLE connection after timeout or error
+            print("Re-establishing IDLE connection...")
+            imap.idle_done()
+            time.sleep(1)  # Delay before re-establishing
+
+    except Exception as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 500
+    finally:
+        imap.close()
+        imap.logout()
+
+
+@app.route('/start_monitoring', methods=['POST'])
+def start_monitoring():
+    # Call the mailbox monitoring function
+    response = monitor_mailbox()
+    return response
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=my_scheduled_job, trigger="interval", minutes=1)
+    scheduler.start()
+
+    try:
+        app.run(debug=True)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
