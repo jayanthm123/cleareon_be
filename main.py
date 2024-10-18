@@ -25,11 +25,6 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-
-def my_scheduled_job():
-    # Your task logic here
-    print("Scheduled function is running every 10 minutes")
-
 # Database connection
 def get_db_connection():
     conn = psycopg2.connect(
@@ -564,9 +559,35 @@ def fetch_freight_inquiries():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query to fetch all distribution lists
-        cursor.execute(
-            "select id, sent_on, subject, distribution_name, sent_to, responses_received,lowest_quote, status from inquiry_details")
+        # Query to fetch freight inquiries with reply counts
+        query = """
+        SELECT 
+            id.id, 
+            id.sent_on, 
+            id.subject, 
+            id.distribution_name, 
+            id.sent_to, 
+            COALESCE(reply_count.responses_received, 0) as responses_received,
+            id.lowest_quote, 
+            id.status
+        FROM 
+            inquiry_details id
+        LEFT JOIN (
+            SELECT 
+                inquiry_id, 
+                COUNT(reply_mail_id) as responses_received
+            FROM 
+                inquiry_emails_sent
+            WHERE 
+                reply_mail_id IS NOT NULL
+            GROUP BY 
+                inquiry_id
+        ) reply_count ON id.id = reply_count.inquiry_id
+        ORDER BY 
+            id.sent_on DESC
+        """
+
+        cursor.execute(query)
         lists = cursor.fetchall()
 
         # Format the data into a dictionary
@@ -590,6 +611,7 @@ def fetch_freight_inquiries():
         return jsonify(lists_data), 200
 
     except Exception as e:
+        print(f"Error in fetch_freight_inquiries: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -670,17 +692,13 @@ def update_client_config(client_id, client_account_id, config_key, config_value)
 @app.route('/fetch_and_store_emails', methods=['POST'])
 def fetch_and_store_emails():
     try:
-        print("Starting")
         data = request.json
         email_address = data.get('email')
         password = data.get('password')
         imap_server = data.get('imap_server')
-
         imap = imaplib.IMAP4_SSL(imap_server)
         imap.login(email_address, password)
         imap.select('INBOX')
-        print(imap.capabilities)
-
         last_refresh = get_client_config('default', 'default', 'last_refresh_datetime')
         last_refresh = datetime.fromisoformat(last_refresh)
         search_criterion = f'(SINCE "{last_refresh.strftime("%d-%b-%Y")}")'
@@ -740,12 +758,12 @@ def get_processed_emails():
         emails = cur.fetchall()
         cur.close()
         conn.close()
+        find_and_store_email_replies()
         return jsonify([dict(email) for email in emails]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# New route to update client configuration
 @app.route('/update_client_config', methods=['POST'])
 def update_config():
     try:
@@ -764,112 +782,82 @@ def update_config():
         return jsonify({"error": str(e)}), 500
 
 
-def monitor_mailbox():
+def find_and_store_email_replies():
+    print('starting')
     try:
-        print("Starting")
-        data = request.json
-        email_address = 'cleareontestmailbox@gmail.com'
-        password = 'awiqwxcxapuaxdxl'
-        imap_server = 'imap.gmail.com'
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
 
-        # Connect to the IMAP server
-        imap = imaplib.IMAP4_SSL(imap_server)
-        imap.login(email_address, password)
-        imap.select('INBOX')
-        print(imap.capabilities)
+        # Fetch all sent inquiry emails
+        cursor.execute("SELECT id, message_id, subject, to_email FROM inquiry_emails_sent WHERE reply_mail_id IS NULL")
+        sent_emails = cursor.fetchall()
 
-        # Store the last refresh datetime
-        last_refresh = get_client_config('default', 'default', 'last_refresh_datetime')
-        last_refresh = datetime.fromisoformat(last_refresh)
+        # Fetch all unprocessed emails
+        cursor.execute("SELECT id, headers, subject, sender FROM processed_emails WHERE isReplyProcessed = FALSE")
+        processed_emails = cursor.fetchall()
 
-        # Function to process new messages
-        def process_new_messages():
-            search_criterion = f'(SINCE "{last_refresh.strftime("%d-%b-%Y")}")'
-            _, messages = imap.search(None, search_criterion)
+        # Dictionary to store the results
+        replies = {}
 
-            conn = get_db_connection()
-            cur = conn.cursor()
-            ctr = 0
+        # Set to keep track of all processed email IDs
+        all_processed_ids = set()
 
-            for num in messages[0].split():
-                _, msg_data = imap.fetch(num, '(RFC822)')
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        ctr += 1
-                        msg = email.message_from_bytes(response_part[1], policy=default)
-                        email_data = parse_email(msg)
+        for sent_email in sent_emails:
+            sent_id = sent_email['id']
+            sent_message_id = sent_email['message_id']
+            sent_subject = sent_email['subject']
+            sent_to = sent_email['to_email']
 
-                        cur.execute(""" 
-                            INSERT INTO processed_emails 
-                            (message_id, subject, sender, recipient, cc, bcc, received_date, body_text, body_html, headers, attachments, folder) 
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                            ON CONFLICT (message_id) DO NOTHING
-                        """, (
-                            email_data['message_id'],
-                            email_data['subject'],
-                            email_data['sender'],
-                            email_data['recipient'],
-                            email_data['cc'],
-                            email_data['bcc'],
-                            email_data['received_date'],
-                            email_data['body_text'],
-                            email_data['body_html'],
-                            Json(email_data['headers']),
-                            Json(email_data['attachments']),
-                            'INBOX'
-                        ))
-            conn.commit()
-            cur.close()
-            conn.close()
-            return ctr
+            for processed_email in processed_emails:
+                processed_id = processed_email['id']
+                headers = processed_email['headers']
+                processed_subject = processed_email['subject']
+                from_addr = processed_email['sender'][
+                            processed_email['sender'].find('<') + 1:processed_email['sender'].find('>')]
 
-        # Continuous monitoring using IDLE
-        while True:
-            # Start the IDLE command
-            imap.idle()
-            print("Waiting for new emails...")
+                # Add this processed email ID to the set of all processed IDs
+                all_processed_ids.add(processed_id)
 
-            # Wait for new mail notifications
-            while True:
-                try:
-                    # Wait for an email to arrive
-                    imap.idle_check(timeout=300)  # 5-minute timeout
-                    new_email_count = process_new_messages()
-                    if new_email_count > 0:
-                        print(f"{new_email_count} new emails processed")
-                        # Update last refresh datetime
-                        update_client_config('default', 'default', 'last_refresh_datetime',
-                                             datetime.now(timezone.utc).isoformat())
-                except imaplib.IMAP4.error as idle_error:
-                    print(f"Error during IDLE: {idle_error}")
-                    break  # Break the inner loop to re-establish IDLE
+                # Check if the processed email is a reply to the sent email
+                is_reply = False
+                if 'In-Reply-To' in headers and headers['In-Reply-To'] == sent_message_id:
+                    is_reply = True
+                elif 'References' in headers and sent_message_id in headers['References']:
+                    is_reply = True
+                elif from_addr == sent_to and processed_subject.lower().startswith('re:') and processed_subject[
+                                                                                              3:].strip() == sent_subject.strip():
+                    is_reply = True
 
-            # Re-establish IDLE connection after timeout or error
-            print("Re-establishing IDLE connection...")
-            imap.idle_done()
-            time.sleep(1)  # Delay before re-establishing
+                if is_reply:
+                    replies[sent_id] = processed_id
+
+        # Update the database with the reply information
+        for sent_id, reply_id in replies.items():
+            cursor.execute("""
+                UPDATE inquiry_emails_sent 
+                SET reply_mail_id = %s 
+                WHERE id = %s
+            """, (reply_id, sent_id))
+
+        # Mark all processed emails as processed, whether they're replies or not
+        for processed_id in all_processed_ids:
+            cursor.execute("""
+                UPDATE processed_emails 
+                SET isReplyProcessed = TRUE 
+                WHERE id = %s
+            """, (processed_id,))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return f"Processed {len(replies)} replies. Marked {len(all_processed_ids)} emails as processed."
 
     except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
-    finally:
-        imap.close()
-        imap.logout()
-
-
-@app.route('/start_monitoring', methods=['POST'])
-def start_monitoring():
-    # Call the mailbox monitoring function
-    response = monitor_mailbox()
-    return response
+        print(f"Error in find_and_store_email_replies: {str(e)}")
+        return f"Error: {str(e)}"
 
 
 if __name__ == '__main__':
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=my_scheduled_job, trigger="interval", minutes=1)
-    scheduler.start()
+    app.run(debug=True)
 
-    try:
-        app.run(debug=True)
-    except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown()

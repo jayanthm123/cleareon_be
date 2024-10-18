@@ -93,3 +93,14 @@ CREATE TABLE IF NOT EXISTS public.inquiry_emails_sent
     to_email text COLLATE pg_catalog."default" NOT NULL,
     cc text COLLATE pg_catalog."default"
 )
+
+Select * from processed_emails
+
+alter table processed_emails add column isReplyProcessed BOOLEAN DEFAULT FALSE;
+alter table  inquiry_emails_sent  add column  reply_mail_id INTEGER
+
+select * from inquiry_emails_sent
+
+update inquiry_emails_sent set reply_mail_id = null
+
+update processed_emails set isReplyProcessed = false
