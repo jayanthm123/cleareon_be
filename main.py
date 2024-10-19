@@ -6,7 +6,6 @@ from flask import Flask, request, jsonify
 import imaplib
 import email
 from email.policy import default
-from apscheduler.schedulers.background import BackgroundScheduler
 from flask.cli import load_dotenv
 from psycopg2 import sql
 from datetime import datetime
@@ -16,14 +15,18 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 import os
-
+from sitecontrols import sitecontrol_bp
 from psycopg2._json import Json
 from psycopg2.extras import DictCursor
 from email.utils import parsedate_to_datetime, make_msgid
+from psycopg2.extras import DictCursor
+import uuid
+
 
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
+app.register_blueprint(sitecontrol_bp, url_prefix='/sitecontrols')
 
 # Database connection
 def get_db_connection():
@@ -858,6 +861,328 @@ def find_and_store_email_replies():
         return f"Error: {str(e)}"
 
 
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.route('/fetch_inquiry_replies/<int:inquiry_id>', methods=['GET'])
+def fetch_inquiry_replies(inquiry_id):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
 
+        # Fetch the inquiry and its replies
+        cursor.execute("""
+            SELECT 
+                i.inquiry_id AS id,
+                i.subject AS subject,
+                i.to_email AS sent_to,
+                i.sent_on AS sent_date,
+                pe.id AS reply_id,
+                pe.subject AS reply_subject,
+                pe.sender AS reply_sender,
+                pe.received_date AS reply_date,
+                pe.body_text AS body_text,
+                pe.body_html AS body_html
+            FROM inquiry_emails_sent i
+            LEFT JOIN processed_emails pe ON pe.id = i.reply_mail_id
+            WHERE i.inquiry_id = %s
+            ORDER BY pe.received_date IS NULL, pe.received_date DESC 
+        """, (inquiry_id,))
+
+        results = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not results:
+            return jsonify({"error": "Inquiry not found"}), 404
+
+        # Process the results
+        sent_items = []
+        for row in results:
+            sent_items.append({
+                'id': row['id'],
+                'subject': row['subject'],
+                'sent_to': row['sent_to'],
+                'sent_date': row['sent_date'].isoformat() if row['sent_date'] else None,
+                'replied': 'Yes' if row['reply_id'] else 'No',
+                'reply_received_on': row['reply_date'].isoformat() if row['reply_date'] else 'Not Applicable',
+                'body_text': row['body_text'],
+                'body_html': row['body_html']
+            })
+
+        return jsonify({'sent_items': sent_items}), 200
+    except Exception as e:
+        print(f"Error in fetch_inquiry_replies: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        host="pg-3c0f63d9-cleareon.l.aivencloud.com",
+        database="cleareon_db",
+        user="avnadmin",
+        password="AVNS_mPoJaHeUZxZjg-eWQ_p",
+        port="22635",
+        sslmode="require"
+    )
+    return conn
+
+# User routes
+@app.route('/users', methods=['GET'])
+def get_users():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM users")
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(user) for user in users])
+
+
+@app.route('/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (user_id, client_id, role_id, username, email, password_hash) VALUES (%s, %s, %s, %s, %s, %s)",
+        (str(uuid.uuid4()), data['client_id'], data['role_id'], data['username'], data['email'], data['password_hash'])
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "User created successfully"}), 201
+
+
+@app.route('/users/<string:user_id>', methods=['GET'])
+def get_user(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    return jsonify(dict(user)) if user else ("User not found", 404)
+
+
+@app.route('/users/<string:user_id>', methods=['PUT'])
+def update_user(user_id):
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET client_id = %s, role_id = %s, username = %s, email = %s WHERE user_id = %s",
+        (data['client_id'], data['role_id'], data['username'], data['email'], user_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "User updated successfully"})
+
+
+@app.route('/users/<string:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "User deleted successfully"})
+
+
+# Role routes
+@app.route('/roles', methods=['GET'])
+def get_roles():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM roles")
+    roles = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(role) for role in roles])
+
+
+@app.route('/roles', methods=['POST'])
+def create_role():
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO roles (role_name) VALUES (%s) RETURNING role_id",
+        (data['role_name'],)
+    )
+    role_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Role created successfully", "role_id": role_id}), 201
+
+
+@app.route('/roles/<int:role_id>', methods=['GET'])
+def get_role(role_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM roles WHERE role_id = %s", (role_id,))
+    role = cur.fetchone()
+    cur.close()
+    conn.close()
+    return jsonify(dict(role)) if role else ("Role not found", 404)
+
+
+@app.route('/roles/<int:role_id>', methods=['PUT'])
+def update_role(role_id):
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE roles SET role_name = %s WHERE role_id = %s",
+        (data['role_name'], role_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Role updated successfully"})
+
+
+@app.route('/roles/<int:role_id>', methods=['DELETE'])
+def delete_role(role_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM roles WHERE role_id = %s", (role_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Role deleted successfully"})
+
+
+# Permission routes
+@app.route('/permissions', methods=['GET'])
+def get_permissions():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM permissions")
+    permissions = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(permission) for permission in permissions])
+
+
+@app.route('/permissions', methods=['POST'])
+def create_permission():
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO permissions (permission_name) VALUES (%s) RETURNING permission_id",
+        (data['permission_name'],)
+    )
+    permission_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Permission created successfully", "permission_id": permission_id}), 201
+
+
+@app.route('/permissions/<int:permission_id>', methods=['GET'])
+def get_permission(permission_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM permissions WHERE permission_id = %s", (permission_id,))
+    permission = cur.fetchone()
+    cur.close()
+    conn.close()
+    return jsonify(dict(permission)) if permission else ("Permission not found", 404)
+
+
+@app.route('/permissions/<int:permission_id>', methods=['PUT'])
+def update_permission(permission_id):
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE permissions SET permission_name = %s WHERE permission_id = %s",
+        (data['permission_name'], permission_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Permission updated successfully"})
+
+
+@app.route('/permissions/<int:permission_id>', methods=['DELETE'])
+def delete_permission(permission_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM permissions WHERE permission_id = %s", (permission_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Permission deleted successfully"})
+
+
+# Client routes
+@app.route('/clients', methods=['GET'])
+def get_clients():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM clients")
+    clients = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(client) for client in clients])
+
+
+@app.route('/clients', methods=['POST'])
+def create_client():
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO clients (client_id, company_name, invoice_number, start_date, term_date) VALUES (%s, %s, %s, %s, %s)",
+        (str(uuid.uuid4()), data['company_name'], data['invoice_number'], data['start_date'], data['term_date'])
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Client created successfully"}), 201
+
+
+@app.route('/clients/<string:client_id>', methods=['GET'])
+def get_client(client_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute("SELECT * FROM clients WHERE client_id = %s", (client_id,))
+    client = cur.fetchone()
+    cur.close()
+    conn.close()
+    return jsonify(dict(client)) if client else ("Client not found", 404)
+
+
+@app.route('/clients/<string:client_id>', methods=['PUT'])
+def update_client(client_id):
+    data = request.get_json()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE clients SET company_name = %s, invoice_number = %s, start_date = %s, term_date = %s WHERE client_id = %s",
+        (data['company_name'], data['invoice_number'], data['start_date'], data['term_date'], client_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Client updated successfully"})
+
+
+@app.route('/clients/<string:client_id>', methods=['DELETE'])
+def delete_client(client_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM clients WHERE client_id = %s", (client_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Client deleted successfully"})
+
+
+if __name__ == '__main__':
+    app.run(debug=True, use_reloader=False, threaded=False)

@@ -94,13 +94,105 @@ CREATE TABLE IF NOT EXISTS public.inquiry_emails_sent
     cc text COLLATE pg_catalog."default"
 )
 
-Select * from processed_emails
+CREATE TABLE clients (
+    client_id UUID PRIMARY KEY,
+    company_name VARCHAR(255) NOT NULL
+)
 
-alter table processed_emails add column isReplyProcessed BOOLEAN DEFAULT FALSE;
-alter table  inquiry_emails_sent  add column  reply_mail_id INTEGER
+CREATE TABLE roles (
+    role_id SERIAL PRIMARY KEY,
+    role_name VARCHAR(50) UNIQUE NOT NULL
+)
 
-select * from inquiry_emails_sent
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY,
+    client_id UUID REFERENCES clients(client_id),
+    role_id INTEGER REFERENCES roles(role_id),
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL
+)
 
-update inquiry_emails_sent set reply_mail_id = null
+CREATE TABLE permissions (
+    permission_id SERIAL PRIMARY KEY,
+    permission_name VARCHAR(100) UNIQUE NOT NULL
+)
 
-update processed_emails set isReplyProcessed = false
+CREATE TABLE role_permissions (
+    role_id INTEGER REFERENCES roles(role_id),
+    permission_id INTEGER REFERENCES permissions(permission_id),
+    PRIMARY KEY (role_id, permission_id)
+)
+
+
+-- Set up Permissions
+INSERT INTO permissions (permission_name) VALUES
+('ImportFiling'),
+('ExportFiling'),
+('ViewAnalytics'),
+('UpdateMaster'),
+('SmartMail'),
+('AppControl');
+
+-- Set up Roles
+INSERT INTO roles (role_name) VALUES
+('Admin'),
+('ClientLeadwSmartEmail'),
+('ClientUserwSmartEmail'),
+('ClientLeadwoSmartEmail'),
+('ClientUserwoSmartEmail');
+
+-- Assign Permissions to Roles
+-- Admin (all permissions)
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.role_id, p.permission_id
+FROM roles r, permissions p
+WHERE r.role_name = 'Admin';
+
+-- ClientLeadwSmartEmail (all except AppControl)
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.role_id, p.permission_id
+FROM roles r, permissions p
+WHERE r.role_name = 'ClientLeadwSmartEmail'
+  AND p.permission_name != 'AppControl';
+
+-- ClientUserwSmartEmail (all except AppControl, UpdateMaster)
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.role_id, p.permission_id
+FROM roles r, permissions p
+WHERE r.role_name = 'ClientUserwSmartEmail'
+  AND p.permission_name NOT IN ('AppControl', 'UpdateMaster');
+
+-- ClientLeadwoSmartEmail (all except AppControl, SmartEmail)
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.role_id, p.permission_id
+FROM roles r, permissions p
+WHERE r.role_name = 'ClientLeadwoSmartEmail'
+  AND p.permission_name NOT IN ('AppControl', 'SmartMail');
+
+-- ClientUserwoSmartEmail (all except AppControl, UpdateMaster, SmartEmail)
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.role_id, p.permission_id
+FROM roles r, permissions p
+WHERE r.role_name = 'ClientUserwoSmartEmail'
+  AND p.permission_name NOT IN ('AppControl', 'UpdateMaster', 'SmartMail');
+
+-- Create default admin client
+INSERT INTO clients (client_id, company_name)
+VALUES (gen_random_uuid(), 'Admin');
+
+-- Create default admin user
+INSERT INTO users (user_id, client_id, role_id, username, email, password_hash)
+SELECT
+    gen_random_uuid(),
+    c.client_id,
+    r.role_id,
+    'admin',
+    'cleareon_testmailbox@gmail.com',
+    'hashed_password'
+FROM
+    clients c,
+    roles r
+WHERE
+    c.company_name = 'Admin'
+    AND r.role_name = 'Admin';
