@@ -1,7 +1,8 @@
 import psycopg2
 from flask import Blueprint, request, jsonify
-from psycopg2.extras import DictCursor
 import uuid
+from psycopg2.extras import DictCursor
+from psycopg2 import IntegrityError
 
 sitecontrol_bp = Blueprint('sitecontrol', __name__)
 
@@ -16,6 +17,7 @@ def get_db_connection():
         sslmode="require"
     )
     return conn
+
 
 # User routes
 @sitecontrol_bp.route('/users', methods=['GET'])
@@ -82,68 +84,155 @@ def delete_user(user_id):
 
 
 # Role routes
-@sitecontrol_bp.route('/roles', methods=['GET'])
+@sitecontrol_bp.route('/rossles', methods=['GET'])
 def get_roles():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute("SELECT * FROM roles")
-    roles = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify([dict(role) for role in roles])
+    print('I am being called')
+    try:
+        # Get roles with their permissions
+        cur.execute("""
+            SELECT r.role_id, r.role_name, 
+                   COALESCE(array_agg(
+                       DISTINCT jsonb_build_object(
+                           'permission_id', p.permission_id, 
+                           'permission_name', p.permission_name
+                       )
+                   ) FILTER (WHERE p.permission_id IS NOT NULL), '{}') as permissions
+            FROM roles r
+            LEFT JOIN role_permissions rp ON r.role_id = rp.role_id
+            LEFT JOIN permissions p ON rp.permission_id = p.permission_id
+            GROUP BY r.role_id, r.role_name
+            ORDER BY r.role_id
+        """)
+        roles = [dict(row) for row in cur.fetchall()]
+        print(roles)
+        return jsonify(roles)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 @sitecontrol_bp.route('/roles', methods=['POST'])
 def create_role():
     data = request.get_json()
+    if not data or 'role_name' not in data:
+        return jsonify({"error": "Role name is required"}), 400
+
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO roles (role_name) VALUES (%s) RETURNING role_id",
-        (data['role_name'],)
-    )
-    role_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Role created successfully", "role_id": role_id}), 201
 
+    try:
+        # Start transaction
+        conn.autocommit = False
 
-@sitecontrol_bp.route('/roles/<int:role_id>', methods=['GET'])
-def get_role(role_id):
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute("SELECT * FROM roles WHERE role_id = %s", (role_id,))
-    role = cur.fetchone()
-    cur.close()
-    conn.close()
-    return jsonify(dict(role)) if role else ("Role not found", 404)
+        # Insert role
+        cur.execute(
+            "INSERT INTO roles (role_name) VALUES (%s) RETURNING role_id",
+            (data['role_name'],)
+        )
+        role_id = cur.fetchone()[0]
+
+        # Insert permissions
+        if 'permissions' in data and data['permissions']:
+            values = [(role_id, permission_id) for permission_id in data['permissions']]
+            cur.executemany(
+                "INSERT INTO role_permissions (role_id, permission_id) VALUES (%s, %s)",
+                values
+            )
+
+        conn.commit()
+        return jsonify({"message": "Role created successfully", "role_id": role_id}), 201
+
+    except IntegrityError as e:
+        conn.rollback()
+        return jsonify({"error": "Role name already exists"}), 409
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.autocommit = True
+        cur.close()
+        conn.close()
 
 
 @sitecontrol_bp.route('/roles/<int:role_id>', methods=['PUT'])
 def update_role(role_id):
     data = request.get_json()
+    if not data or 'role_name' not in data:
+        return jsonify({"error": "Role name is required"}), 400
+
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE roles SET role_name = %s WHERE role_id = %s",
-        (data['role_name'], role_id)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Role updated successfully"})
+
+    try:
+        # Start transaction
+        conn.autocommit = False
+
+        # Update role
+        cur.execute(
+            "UPDATE roles SET role_name = %s WHERE role_id = %s",
+            (data['role_name'], role_id)
+        )
+
+        # Update permissions
+        if 'permissions' in data:
+            # Delete existing permissions
+            cur.execute("DELETE FROM role_permissions WHERE role_id = %s", (role_id,))
+
+            # Insert new permissions
+            if data['permissions']:
+                values = [(role_id, permission_id) for permission_id in data['permissions']]
+                cur.executemany(
+                    "INSERT INTO role_permissions (role_id, permission_id) VALUES (%s, %s)",
+                    values
+                )
+
+        conn.commit()
+        return jsonify({"message": "Role updated successfully"})
+
+    except IntegrityError as e:
+        conn.rollback()
+        return jsonify({"error": "Role name already exists"}), 409
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.autocommit = True
+        cur.close()
+        conn.close()
 
 
 @sitecontrol_bp.route('/roles/<int:role_id>', methods=['DELETE'])
 def delete_role(role_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM roles WHERE role_id = %s", (role_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Role deleted successfully"})
+
+    try:
+        # Start transaction
+        conn.autocommit = False
+
+        # Delete role permissions first (due to foreign key constraint)
+        cur.execute("DELETE FROM role_permissions WHERE role_id = %s", (role_id,))
+
+        # Delete role
+        cur.execute("DELETE FROM roles WHERE role_id = %s", (role_id,))
+
+        if cur.rowcount == 0:
+            return jsonify({"error": "Role not found"}), 404
+
+        conn.commit()
+        return jsonify({"message": "Role deleted successfully"})
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.autocommit = True
+        cur.close()
+        conn.close()
 
 
 # Permission routes

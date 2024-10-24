@@ -1,32 +1,289 @@
 import smtplib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import psycopg2
 from flask import Flask, request, jsonify
 import imaplib
 import email
-from email.policy import default
+from flask_jwt_extended import jwt_required, get_jwt_identity, JWTManager, create_access_token
+from psycopg2.errors import DatabaseError
 from flask.cli import load_dotenv
 from psycopg2 import sql
-from datetime import datetime
 from email.header import decode_header
 from flask_cors import CORS
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 import os
-from sitecontrols import sitecontrol_bp
+import logging
+from logging.handlers import RotatingFileHandler
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 from psycopg2._json import Json
-from psycopg2.extras import DictCursor
+from psycopg2.extras import DictCursor, RealDictCursor
 from email.utils import parsedate_to_datetime, make_msgid
 from psycopg2.extras import DictCursor
 import uuid
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
 
 
-load_dotenv()
 app = Flask(__name__)
+
+# Configuration
+app.config['JWT_SECRET_KEY'] = 'your-super-secret-key'  # Change this in production!
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=10)
+app.config['DATABASE_URL'] = "postgresql://user:password@localhost:5432/dbname"
+app.config['MAX_LOGIN_ATTEMPTS'] = 5
+app.config['LOGIN_ATTEMPT_TIMEOUT'] = 300  # 5 minutes in seconds
+
+# Initialize extensions
+jwt = JWTManager(app)
+ph = PasswordHasher()
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    storage_uri="memory://"  # Using in-memory storage for rate limiting
+)
+
+# Configure logging
+if not os.path.exists('logs'):
+    os.mkdir('logs')
+file_handler = RotatingFileHandler('logs/app.log', maxBytes=10240, backupCount=10)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+))
+file_handler.setLevel(logging.INFO)
+app.logger.addHandler(file_handler)
+app.logger.setLevel(logging.INFO)
+
+# Initialize SQLAlchemy
+engine = create_engine(app.config['DATABASE_URL'])
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Enable CORS
 CORS(app)
-app.register_blueprint(sitecontrol_bp, url_prefix='/sitecontrols')
+
+
+# Database session management
+@app.before_request
+def create_db_session():
+    app.db_session = SessionLocal()
+
+
+@app.teardown_appcontext
+def close_db_session(exception=None):
+    db_session = getattr(app, 'db_session', None)
+    if db_session is not None:
+        db_session.close()
+
+
+# Create sessions table
+def create_sessions_table(db):
+    """Create sessions table if it doesn't exist"""
+    query = text("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id UUID PRIMARY KEY,
+            user_id UUID NOT NULL,
+            token TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+    db.execute(query)
+    db.commit()
+
+
+# Helper Functions
+def get_user_permissions(user_id, db):
+    """Get user permissions from database"""
+    query = text("""
+        SELECT DISTINCT p.permission_name 
+        FROM permissions p
+        JOIN role_permissions rp ON p.permission_id = rp.permission_id
+        JOIN users u ON u.role_id = rp.role_id
+        WHERE u.user_id = :user_id
+    """)
+    result = db.execute(query, {'user_id': user_id})
+    return [row[0] for row in result]
+
+
+def check_client_term_date(client_id, db):
+    """Check if client's term date is valid"""
+    query = text("""
+        SELECT term_date 
+        FROM clients 
+        WHERE client_id = :client_id
+    """)
+    result = db.execute(query, {'client_id': client_id}).first()
+    if result and result[0]:
+        return datetime.now().date() <= result[0]
+    return True
+
+
+def invalidate_user_sessions(user_id, db):
+    """Invalidate all active sessions for a user"""
+    query = text("""
+        UPDATE user_sessions 
+        SET is_active = FALSE 
+        WHERE user_id = :user_id AND is_active = TRUE
+    """)
+    db.execute(query, {'user_id': user_id})
+    db.commit()
+
+
+def create_user_session(user_id, token, expires_at, db):
+    """Create a new session for a user"""
+    query = text("""
+        INSERT INTO user_sessions (session_id, user_id, token, expires_at)
+        VALUES (:session_id, :user_id, :token, :expires_at)
+    """)
+    session_id = uuid.uuid4()
+    db.execute(query, {
+        'session_id': session_id,
+        'user_id': user_id,
+        'token': token,
+        'expires_at': expires_at
+    })
+    db.commit()
+    return session_id
+
+
+def is_token_revoked(token, db):
+    """Check if a token is revoked"""
+    query = text("""
+        SELECT EXISTS(
+            SELECT 1 
+            FROM user_sessions 
+            WHERE token = :token 
+            AND is_active = FALSE
+        )
+    """)
+    result = db.execute(query, {'token': token}).scalar()
+    return result
+
+
+# Auth Routes
+@app.route('/login', methods=['POST'])
+@limiter.limit(f"{app.config['MAX_LOGIN_ATTEMPTS']}/5 minutes")
+def login():
+    print('starting')
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({'error': 'Missing credentials'}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = sql.SQL("SELECT u.user_id, u.password_hash, u.client_id, u.email,r.role_name, c.company_name "
+                        "FROM users u JOIN roles r ON u.role_id = r.role_id JOIN clients c "
+                        "ON u.client_id = c.client_id WHERE u.email = %s")
+        cursor.execute(query, (username,))
+        result = cursor.fetchone()
+        print(result)
+        if not result:
+            return jsonify({'error': 'Invalid credentials'}), 401
+
+        user_id, password_hash, client_id, email, role_name, company_name = result
+
+        # Verify password
+        try:
+            ph.verify(password_hash, password)
+        except VerifyMismatchError:
+            return jsonify({'error': 'Invalid credentials'}), 401
+
+        # Check client term date
+        if not check_client_term_date(client_id, db):
+            return jsonify({'error': 'Account expired'}), 403
+
+        # Get user permissions
+        permissions = get_user_permissions(user_id, db)
+
+        # Create user identity
+        user_identity = {
+            'user_id': str(user_id),
+            'username': username,
+            'email': email,
+            'role': role_name,
+            'client_id': str(client_id),
+            'company_name': company_name,
+            'permissions': permissions
+        }
+
+        # Create access token
+        access_token = create_access_token(identity=user_identity)
+        expires_at = datetime.now(timezone.utc) + app.config['JWT_ACCESS_TOKEN_EXPIRES']
+
+        # Invalidate old sessions
+        invalidate_user_sessions(user_id, db)
+
+        # Create new session
+        create_user_session(user_id, access_token, expires_at, db)
+
+        return jsonify({
+            'access_token': access_token,
+            'user': user_identity
+        }), 200
+
+    except Exception as e:
+        app.logger.error(f"Login error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or 'Bearer' not in auth_header:
+            return jsonify({'error': 'Missing token'}), 401
+
+        token = auth_header.split(' ')[1]
+        user_identity = get_jwt_identity()
+        user_id = user_identity['user_id']
+
+        # Invalidate the session in database
+        db = app.db_session
+        query = text("""
+            UPDATE user_sessions 
+            SET is_active = FALSE 
+            WHERE user_id = :user_id 
+            AND token = :token
+        """)
+        db.execute(query, {'user_id': user_id, 'token': token})
+        db.commit()
+
+        return jsonify({'message': 'Successfully logged out'}), 200
+
+    except Exception as e:
+        app.logger.error(f"Logout error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+# JWT token validation
+@jwt.token_in_blocklist_loader
+def check_if_token_revoked(jwt_header, jwt_payload):
+    token = jwt_payload["jti"]
+    db = app.db_session
+    return is_token_revoked(token, db)
+
+
+# Error handlers
+@app.errorhandler(404)
+def not_found_error(error):
+    return {'error': 'Not Found'}, 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    app.db_session.rollback()
+    return {'error': 'Internal Server Error'}, 500
+
 
 # Database connection
 def get_db_connection():
@@ -914,18 +1171,6 @@ def fetch_inquiry_replies(inquiry_id):
         return jsonify({"error": str(e)}), 500
 
 
-
-def get_db_connection():
-    conn = psycopg2.connect(
-        host="pg-3c0f63d9-cleareon.l.aivencloud.com",
-        database="cleareon_db",
-        user="avnadmin",
-        password="AVNS_mPoJaHeUZxZjg-eWQ_p",
-        port="22635",
-        sslmode="require"
-    )
-    return conn
-
 # User routes
 @app.route('/users', methods=['GET'])
 def get_users():
@@ -995,11 +1240,31 @@ def delete_user(user_id):
 def get_roles():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute("SELECT * FROM roles")
-    roles = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify([dict(role) for role in roles])
+    print('I am being called')
+    try:
+        # Get roles with their permissions
+        cur.execute("""
+            SELECT r.role_id, r.role_name, 
+                   COALESCE(array_agg(
+                       DISTINCT jsonb_build_object(
+                           'permission_id', p.permission_id, 
+                           'permission_name', p.permission_name
+                       )
+                   ) FILTER (WHERE p.permission_id IS NOT NULL), '{}') as permissions
+            FROM roles r
+            LEFT JOIN role_permissions rp ON r.role_id = rp.role_id
+            LEFT JOIN permissions p ON rp.permission_id = p.permission_id
+            GROUP BY r.role_id, r.role_name
+            ORDER BY r.role_id
+        """)
+        roles = [dict(row) for row in cur.fetchall()]
+        print(roles)
+        return jsonify(roles)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.route('/roles', methods=['POST'])
@@ -1182,6 +1447,105 @@ def delete_client(client_id):
     cur.close()
     conn.close()
     return jsonify({"message": "Client deleted successfully"})
+
+
+@app.route('/clients/<client_id>/users', methods=['GET'])
+@jwt_required()
+def get_client_users(client_id):
+    """
+    Get all users associated with a specific client.
+    Returns user details including their roles.
+    Requires either admin access or being a user of the specified client.
+    """
+    current_user_id = get_jwt_identity()
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Check if user has permission to view these users
+                cur.execute("""
+                    SELECT 
+                        u.client_id,
+                        r.role_name
+                    FROM users u
+                    JOIN roles r ON u.role_id = r.role_id
+                    WHERE u.user_id = %s
+                """, (current_user_id,))
+
+                user_info = cur.fetchone()
+                if not user_info:
+                    return jsonify({
+                        'error': 'User not found'
+                    }), 404
+
+                # Allow access if user is admin or belongs to the same client
+                is_admin = user_info['role_name'] == 'Admin'
+                is_same_client = str(user_info['client_id']) == str(client_id)
+
+                if not (is_admin or is_same_client):
+                    return jsonify({
+                        'error': 'Access denied'
+                    }), 403
+
+                # Validate client exists
+                cur.execute("""
+                    SELECT client_id 
+                    FROM clients 
+                    WHERE client_id = %s
+                """, (client_id,))
+
+                if not cur.fetchone():
+                    return jsonify({
+                        'error': 'Client not found'
+                    }), 404
+
+                # Get all users associated with the client
+                cur.execute("""
+                    SELECT 
+                        u.user_id,
+                        u.username,
+                        u.email,
+                        r.role_name,
+                        u.created_at,
+                        u.updated_at,
+                        u.last_login
+                    FROM users u
+                    JOIN roles r ON u.role_id = r.role_id
+                    WHERE u.client_id = %s
+                    ORDER BY u.username
+                """, (client_id,))
+
+                users = cur.fetchall()
+
+                # Convert datetime objects to strings
+                for user in users:
+                    if user.get('created_at'):
+                        user['created_at'] = user['created_at'].isoformat()
+                    if user.get('updated_at'):
+                        user['updated_at'] = user['updated_at'].isoformat()
+                    if user.get('last_login'):
+                        user['last_login'] = user['last_login'].isoformat()
+
+                return jsonify(users)
+
+    except ValueError as e:
+        return jsonify({
+            'error': 'Invalid client ID format'
+        }), 400
+
+    except DatabaseError as e:
+        # Log the error details here
+        print(f"Database error: {str(e)}")
+        return jsonify({
+            'error': 'Database error occurred'
+        }), 500
+
+    except Exception as e:
+        # Log the error details here
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            'error': 'An unexpected error occurred'
+        }), 500
 
 
 if __name__ == '__main__':
