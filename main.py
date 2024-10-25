@@ -29,13 +29,11 @@ from flask_limiter.util import get_remote_address
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-
 app = Flask(__name__)
 
 # Configuration
 app.config['JWT_SECRET_KEY'] = 'your-super-secret-key'  # Change this in production!
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=10)
-app.config['DATABASE_URL'] = "postgresql://user:password@localhost:5432/dbname"
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=1    )
 app.config['MAX_LOGIN_ATTEMPTS'] = 5
 app.config['LOGIN_ATTEMPT_TIMEOUT'] = 300  # 5 minutes in seconds
 
@@ -59,118 +57,196 @@ file_handler.setLevel(logging.INFO)
 app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 
-# Initialize SQLAlchemy
-engine = create_engine(app.config['DATABASE_URL'])
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 # Enable CORS
 CORS(app)
 
 
-# Database session management
-@app.before_request
-def create_db_session():
-    app.db_session = SessionLocal()
-
-
-@app.teardown_appcontext
-def close_db_session(exception=None):
-    db_session = getattr(app, 'db_session', None)
-    if db_session is not None:
-        db_session.close()
-
-
-# Create sessions table
-def create_sessions_table(db):
-    """Create sessions table if it doesn't exist"""
-    query = text("""
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            session_id UUID PRIMARY KEY,
-            user_id UUID NOT NULL,
-            token TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE
-        )
-    """)
-    db.execute(query)
-    db.commit()
-
-
 # Helper Functions
-def get_user_permissions(user_id, db):
+def get_user_permissions(user_id):
     """Get user permissions from database"""
-    query = text("""
-        SELECT DISTINCT p.permission_name 
-        FROM permissions p
-        JOIN role_permissions rp ON p.permission_id = rp.permission_id
-        JOIN users u ON u.role_id = rp.role_id
-        WHERE u.user_id = :user_id
-    """)
-    result = db.execute(query, {'user_id': user_id})
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    query = sql.SQL("SELECT DISTINCT p.permission_name FROM permissions p JOIN role_permissions rp "
+                    "ON p.permission_id = rp.permission_id JOIN users u ON u.role_id = rp.role_id"
+                    " WHERE u.user_id = %s")
+    cursor.execute(query, (user_id,))
+    result = cursor.fetchone()
     return [row[0] for row in result]
 
 
-def check_client_term_date(client_id, db):
+def check_client_term_date(client_id):
     """Check if client's term date is valid"""
-    query = text("""
-        SELECT term_date 
-        FROM clients 
-        WHERE client_id = :client_id
-    """)
-    result = db.execute(query, {'client_id': client_id}).first()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    query = sql.SQL("SELECT term_date FROM clients WHERE client_id = %s")
+    cursor.execute(query, (client_id,))
+    result = cursor.fetchone()
+    print(result)
     if result and result[0]:
         return datetime.now().date() <= result[0]
     return True
 
 
-def invalidate_user_sessions(user_id, db):
-    """Invalidate all active sessions for a user"""
-    query = text("""
-        UPDATE user_sessions 
-        SET is_active = FALSE 
-        WHERE user_id = :user_id AND is_active = TRUE
-    """)
-    db.execute(query, {'user_id': user_id})
-    db.commit()
-
-
-def create_user_session(user_id, token, expires_at, db):
+# Create sessions table
+def create_user_session(user_id, token, expires_at):
     """Create a new session for a user"""
-    query = text("""
-        INSERT INTO user_sessions (session_id, user_id, token, expires_at)
-        VALUES (:session_id, :user_id, :token, :expires_at)
-    """)
-    session_id = uuid.uuid4()
-    db.execute(query, {
-        'session_id': session_id,
-        'user_id': user_id,
-        'token': token,
-        'expires_at': expires_at
-    })
-    db.commit()
-    return session_id
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                INSERT INTO user_sessions (session_id, user_id, token, expires_at)
+                VALUES (gen_random_uuid(), %s, %s, %s)
+                RETURNING session_id
+            """
+            cursor.execute(query, (user_id, token, expires_at))
+            session_id = cursor.fetchone()[0]
+            conn.commit()
+            return session_id
+    finally:
+        conn.close()
 
 
-def is_token_revoked(token, db):
-    """Check if a token is revoked"""
-    query = text("""
-        SELECT EXISTS(
-            SELECT 1 
-            FROM user_sessions 
-            WHERE token = :token 
-            AND is_active = FALSE
-        )
-    """)
-    result = db.execute(query, {'token': token}).scalar()
-    return result
+def invalidate_user_sessions(user_id):
+    """Invalidate all active sessions for a user"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                UPDATE user_sessions 
+                SET is_revoked = TRUE 
+                WHERE user_id = %s AND is_revoked = FALSE
+            """
+            cursor.execute(query, (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_session_by_token(token):
+    """Get session details by token"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                SELECT session_id, user_id, expires_at, is_revoked
+                FROM user_sessions 
+                WHERE token = %s
+            """
+            cursor.execute(query, (token,))
+            return cursor.fetchone()
+    finally:
+        conn.close()
+
+
+def validate_session(token):
+    """Validate if a session is active and not expired"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                SELECT user_id
+                FROM user_sessions 
+                WHERE token = %s 
+                AND is_revoked = FALSE 
+                AND expires_at > CURRENT_TIMESTAMP
+            """
+            cursor.execute(query, (token,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    finally:
+        conn.close()
+
+
+def revoke_session(session_id):
+    """Revoke a specific session"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                UPDATE user_sessions 
+                SET is_revoked = TRUE 
+                WHERE session_id = %s
+            """
+            cursor.execute(query, (session_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cleanup_expired_sessions():
+    """Remove expired sessions from the database"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                DELETE FROM user_sessions 
+                WHERE expires_at < CURRENT_TIMESTAMP
+                OR is_revoked = TRUE
+            """
+            cursor.execute(query)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_user_session(user_id, token, expires_at):
+    """Create a new session for a user"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                INSERT INTO user_sessions (session_id, user_id, token, expires_at)
+                VALUES (gen_random_uuid(), %s, %s, %s)
+                RETURNING session_id
+            """
+            cursor.execute(query, (user_id, token, expires_at))
+            session_id = cursor.fetchone()[0]
+            conn.commit()
+            return session_id
+    finally:
+        conn.close()
+
+
+def validate_session(token):
+    """Validate if a session is active and not expired"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                SELECT user_id
+                FROM user_sessions 
+                WHERE token = %s 
+                AND is_revoked = FALSE 
+                AND expires_at > CURRENT_TIMESTAMP
+            """
+            cursor.execute(query, (token,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    finally:
+        conn.close()
+
+
+def invalidate_user_sessions(user_id):
+    """Invalidate all active sessions for a user"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                UPDATE user_sessions 
+                SET is_revoked = TRUE 
+                WHERE user_id = %s AND is_revoked = FALSE
+            """
+            cursor.execute(query, (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # Auth Routes
 @app.route('/login', methods=['POST'])
 @limiter.limit(f"{app.config['MAX_LOGIN_ATTEMPTS']}/5 minutes")
 def login():
-    print('starting')
+    conn = None
     try:
         data = request.get_json()
         username = data.get('username')
@@ -180,13 +256,17 @@ def login():
             return jsonify({'error': 'Missing credentials'}), 400
 
         conn = get_db_connection()
-        cursor = conn.cursor()
-        query = sql.SQL("SELECT u.user_id, u.password_hash, u.client_id, u.email,r.role_name, c.company_name "
-                        "FROM users u JOIN roles r ON u.role_id = r.role_id JOIN clients c "
-                        "ON u.client_id = c.client_id WHERE u.email = %s")
-        cursor.execute(query, (username,))
-        result = cursor.fetchone()
-        print(result)
+        with conn.cursor() as cursor:
+            query = """
+                SELECT u.user_id, u.password_hash, u.client_id, u.email, r.role_name, c.company_name 
+                FROM users u 
+                JOIN roles r ON u.role_id = r.role_id 
+                JOIN clients c ON u.client_id = c.client_id 
+                WHERE u.email = %s
+            """
+            cursor.execute(query, (username,))
+            result = cursor.fetchone()
+
         if not result:
             return jsonify({'error': 'Invalid credentials'}), 401
 
@@ -199,11 +279,11 @@ def login():
             return jsonify({'error': 'Invalid credentials'}), 401
 
         # Check client term date
-        if not check_client_term_date(client_id, db):
+        if not check_client_term_date(client_id):
             return jsonify({'error': 'Account expired'}), 403
 
         # Get user permissions
-        permissions = get_user_permissions(user_id, db)
+        permissions = get_user_permissions(user_id)
 
         # Create user identity
         user_identity = {
@@ -221,10 +301,10 @@ def login():
         expires_at = datetime.now(timezone.utc) + app.config['JWT_ACCESS_TOKEN_EXPIRES']
 
         # Invalidate old sessions
-        invalidate_user_sessions(user_id, db)
+        invalidate_user_sessions(user_id)
 
         # Create new session
-        create_user_session(user_id, access_token, expires_at, db)
+        create_user_session(user_id, access_token, expires_at)
 
         return jsonify({
             'access_token': access_token,
@@ -234,10 +314,15 @@ def login():
     except Exception as e:
         app.logger.error(f"Login error: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route('/logout', methods=['POST'])
+@jwt_required()  # Add this decorator
 def logout():
+    conn = None
     try:
         auth_header = request.headers.get('Authorization')
         if not auth_header or 'Bearer' not in auth_header:
@@ -248,29 +333,32 @@ def logout():
         user_id = user_identity['user_id']
 
         # Invalidate the session in database
-        db = app.db_session
-        query = text("""
-            UPDATE user_sessions 
-            SET is_active = FALSE 
-            WHERE user_id = :user_id 
-            AND token = :token
-        """)
-        db.execute(query, {'user_id': user_id, 'token': token})
-        db.commit()
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            query = """
+                UPDATE user_sessions 
+                SET is_active = FALSE 
+                WHERE user_id = %s 
+                AND token = %s
+            """
+            cursor.execute(query, (user_id, token))
+        conn.commit()
 
         return jsonify({'message': 'Successfully logged out'}), 200
 
     except Exception as e:
         app.logger.error(f"Logout error: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 # JWT token validation
 @jwt.token_in_blocklist_loader
 def check_if_token_revoked(jwt_header, jwt_payload):
     token = jwt_payload["jti"]
-    db = app.db_session
-    return is_token_revoked(token, db)
+    return validate_session(token)
 
 
 # Error handlers
@@ -281,8 +369,71 @@ def not_found_error(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    app.db_session.rollback()
     return {'error': 'Internal Server Error'}, 500
+
+
+@app.route('/hash-password', methods=['POST'])
+@jwt_required()  # Ensure only authenticated users can access this
+def hash_password():
+    conn = None
+    try:
+        # Check if user has admin privileges
+        current_user = get_jwt_identity()
+        if 'role' not in current_user or current_user['role'] != 'admin':
+            return jsonify({'error': 'Unauthorized access'}), 403
+
+        data = request.get_json()
+        password = data.get('password')
+        user_id = data.get('user_id')
+
+        if not password or not user_id:
+            return jsonify({'error': 'Missing password or user_id'}), 400
+
+        # Hash the password
+        hashed_password = ph.hash(password)
+
+        # Update the password in the database
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # First verify the user exists
+            cursor.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'User not found'}), 404
+
+            # Update the password
+            query = """
+                UPDATE users 
+                SET password_hash = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = %s
+                RETURNING user_id
+            """
+            cursor.execute(query, (hashed_password, user_id))
+
+            if cursor.rowcount == 0:
+                return jsonify({'error': 'Failed to update password'}), 500
+
+        conn.commit()
+
+        # Invalidate all existing sessions for security
+        invalidate_user_sessions(user_id)
+
+        return jsonify({
+            'message': 'Password successfully updated',
+            'user_id': user_id
+        }), 200
+
+    except ValueError as ve:
+        # Handle validation errors
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        app.logger.error(f"Password hash error: {str(e)}")
+        if conn:
+            conn.rollback()
+        return jsonify({'error': 'Internal server error'}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 # Database connection
@@ -1209,6 +1360,98 @@ def get_user(user_id):
     return jsonify(dict(user)) if user else ("User not found", 404)
 
 
+# !/usr/bin/env python3
+import psycopg2
+import uuid
+from argon2 import PasswordHasher
+from datetime import datetime
+
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        host="pg-3c0f63d9-cleareon.l.aivencloud.com",
+        database="cleareon_db",
+        user="avnadmin",
+        password="AVNS_mPoJaHeUZxZjg-eWQ_p",
+        port="22635",
+        sslmode="require"
+    )
+    return conn
+
+
+def setup_admin():
+    conn = None
+    try:
+        # Initialize password hasher
+        ph = PasswordHasher()
+
+        # Generate admin credentials
+        admin_id = str(uuid.uuid4())
+        admin_email = input("Enter admin email: ")
+        admin_username = input("Enter admin username: ")
+        admin_password = input("Enter admin password: ")
+
+        # Hash the password
+        password_hash = ph.hash(admin_password)
+
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Insert system client
+            client_id = str(uuid.uuid4())
+            cursor.execute("""
+                INSERT INTO clients (client_id, company_name)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING client_id
+            """, (client_id, 'System Admin'))
+
+            client_id_result = cursor.fetchone()
+            if client_id_result is None:
+                # If insert failed, try to find existing System Admin client
+                cursor.execute("""
+                    SELECT client_id FROM clients WHERE company_name = %s
+                """, ('System Admin',))
+                client_id = cursor.fetchone()[0]
+            else:
+                client_id = client_id_result[0]
+
+            # Create the admin user
+            cursor.execute("""
+                INSERT INTO users (
+                    user_id,
+                    username,
+                    email,
+                    password_hash,
+                    role_id,
+                    client_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (email) 
+                DO UPDATE SET 
+                    password_hash = EXCLUDED.password_hash,
+                    username = EXCLUDED.username
+                RETURNING user_id, email, username
+            """, (admin_id, admin_username, admin_email, password_hash, 1, client_id))
+
+            created_user = cursor.fetchone()
+
+        conn.commit()
+        print(f"\nAdmin account successfully created/updated:")
+        print(f"Username: {created_user[2]}")
+        print(f"Email: {created_user[1]}")
+        print(f"User ID: {created_user[0]}")
+        print("\nPlease save these credentials securely.")
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error creating admin account: {str(e)}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route('/users/<string:user_id>', methods=['PUT'])
 def update_user(user_id):
     data = request.get_json()
@@ -1549,4 +1792,5 @@ def get_client_users(client_id):
 
 
 if __name__ == '__main__':
+    # setup_admin()
     app.run(debug=True, use_reloader=False, threaded=False)
