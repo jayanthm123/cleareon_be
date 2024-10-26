@@ -1,0 +1,65 @@
+2024-10-25 01:59:26,139 INFO: Application startup [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:57]
+2024-10-25 02:07:46,023 INFO: Application startup [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:57]
+2024-10-25 02:12:30,609 INFO: Application startup [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:66]
+2024-10-25 02:26:41,818 INFO: Application startup [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:75]
+2024-10-25 02:46:58,122 ERROR: Login error: (psycopg2.OperationalError) connection to server at "localhost" (::1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:248]
+2024-10-25 02:47:35,339 ERROR: Login error: (psycopg2.OperationalError) connection to server at "localhost" (::1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:248]
+2024-10-25 02:48:59,468 ERROR: Login error: (psycopg2.OperationalError) connection to server at "localhost" (::1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:248]
+2024-10-25 02:49:18,001 ERROR: Login error: (psycopg2.OperationalError) connection to server at "localhost" (::1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:249]
+2024-10-25 02:50:07,146 ERROR: Login error: (psycopg2.OperationalError) connection to server at "localhost" (::1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused (0x0000274D/10061)
+	Is the server running on that host and accepting TCP/IP connections?
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:249]
+2024-10-25 02:54:01,223 ERROR: Login error: syntax error at or near ":"
+LINE 7:             WHERE u.username = :username
+                                       ^
+ [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:247]
+2024-10-25 02:55:02,487 ERROR: Login error: syntax error at or near ":"
+LINE 7:             WHERE u.username = :username
+                                       ^
+ [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:247]
+2024-10-25 02:57:21,362 ERROR: Login error: syntax error at or near ":"
+LINE 1: ... c ON u.client_id = c.client_id WHERE u.username = :username
+                                                              ^
+ [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:233]
+2024-10-25 03:00:47,272 ERROR: Login error: not all arguments converted during string formatting [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:02:28,481 ERROR: Login error: not all arguments converted during string formatting [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:04:16,692 ERROR: Login error: not all arguments converted during string formatting [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:06:27,505 ERROR: Login error: not all arguments converted during string formatting [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:09:04,593 ERROR: Login error: not enough values to unpack (expected 6, got 1) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:09:06,665 ERROR: Login error: not enough values to unpack (expected 6, got 1) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:10:06,772 ERROR: Login error: not enough values to unpack (expected 6, got 1) [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-25 03:12:12,406 ERROR: Login error:  [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:235]
+2024-10-26 01:40:33,439 ERROR: Login error:  [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:236]
+2024-10-26 01:41:28,764 ERROR: Login error:  [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:236]
+2024-10-26 02:01:15,924 ERROR: Login error: column "is_active" does not exist
+LINE 4: ...r_id = 'dbf31fd3-831b-4ee3-a90d-91b92d5cab5e' AND is_active ...
+                                                             ^
+ [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:236]
+2024-10-26 02:05:27,730 ERROR: Login error: column "is_active" does not exist
+LINE 4: ...r_id = 'dbf31fd3-831b-4ee3-a90d-91b92d5cab5e' AND is_active ...
+                                                             ^
+ [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:236]
+2024-10-26 03:09:53,571 ERROR: Logout error: You must call `@jwt_required()` or `verify_jwt_in_request()` before using this method [in C:\Users\Jayanth\PycharmProjects\ClearEon_be\main.py:349]
