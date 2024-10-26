@@ -7,7 +7,6 @@ import imaplib
 import email
 from flask_jwt_extended import jwt_required, get_jwt_identity, JWTManager, create_access_token
 from psycopg2.errors import DatabaseError
-from flask.cli import load_dotenv
 from psycopg2 import sql
 from email.header import decode_header
 from flask_cors import CORS
@@ -23,14 +22,17 @@ from psycopg2._json import Json
 from psycopg2.extras import DictCursor, RealDictCursor
 from email.utils import parsedate_to_datetime, make_msgid
 from psycopg2.extras import DictCursor
-import uuid
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from utilities import utilities_bp
 from inquiries import inquiries_bp
 from sitecontrols import sitecontrol_bp
+import psycopg2
+import uuid
+from argon2 import PasswordHasher
+from datetime import datetime
+from AI import get_quote_from_response
 
 app = Flask(__name__)
 app.register_blueprint(utilities_bp, url_prefix='/')
@@ -988,7 +990,7 @@ def fetch_and_store_emails():
         imap.close()
         imap.logout()
         update_client_config('default', 'default', 'last_refresh_datetime', datetime.now(timezone.utc).isoformat())
-
+        find_and_store_email_replies()
         print(f"{ctr} new emails processed")
         return jsonify({"message": "Emails fetched and stored successfully"}), 200
 
@@ -1006,7 +1008,6 @@ def get_processed_emails():
         emails = cur.fetchall()
         cur.close()
         conn.close()
-        find_and_store_email_replies()
         return jsonify([dict(email) for email in emails]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1037,11 +1038,12 @@ def find_and_store_email_replies():
         cursor = conn.cursor(cursor_factory=DictCursor)
 
         # Fetch all sent inquiry emails
-        cursor.execute("SELECT id, message_id, subject, to_email FROM inquiry_emails_sent WHERE reply_mail_id IS NULL")
+        cursor.execute("SELECT id, message_id, subject, inquiry_id, to_email FROM inquiry_emails_sent")
         sent_emails = cursor.fetchall()
 
         # Fetch all unprocessed emails
-        cursor.execute("SELECT id, headers, subject, sender FROM processed_emails WHERE isReplyProcessed = FALSE")
+        cursor.execute("SELECT id, headers, subject, sender, body_text FROM processed_emails WHERE isReplyProcessed = "
+                       "FALSE")
         processed_emails = cursor.fetchall()
 
         # Dictionary to store the results
@@ -1055,6 +1057,7 @@ def find_and_store_email_replies():
             sent_message_id = sent_email['message_id']
             sent_subject = sent_email['subject']
             sent_to = sent_email['to_email']
+            inquiry_id = sent_email['inquiry_id']
 
             for processed_email in processed_emails:
                 processed_id = processed_email['id']
@@ -1062,7 +1065,7 @@ def find_and_store_email_replies():
                 processed_subject = processed_email['subject']
                 from_addr = processed_email['sender'][
                             processed_email['sender'].find('<') + 1:processed_email['sender'].find('>')]
-
+                email_text = processed_email['body_text']
                 # Add this processed email ID to the set of all processed IDs
                 all_processed_ids.add(processed_id)
 
@@ -1072,12 +1075,20 @@ def find_and_store_email_replies():
                     is_reply = True
                 elif 'References' in headers and sent_message_id in headers['References']:
                     is_reply = True
-                elif from_addr == sent_to and processed_subject.lower().startswith('re:') and processed_subject[
-                                                                                              3:].strip() == sent_subject.strip():
+                elif (from_addr == sent_to and processed_subject.lower().startswith('re:') and
+                      processed_subject[3:].strip() == sent_subject.strip()):
                     is_reply = True
 
                 if is_reply:
                     replies[sent_id] = processed_id
+                    quote = get_quote_from_response(email_text)
+                    print(quote)
+                    if quote != 'Unable to determine':
+                        cursor.execute("""
+                                        UPDATE inquiry_emails_sent 
+                                        SET quote = %s 
+                                        WHERE id = %s
+                                    """, (quote, sent_id))
 
         # Update the database with the reply information
         for sent_id, reply_id in replies.items():
@@ -1119,6 +1130,7 @@ def fetch_inquiry_replies(inquiry_id):
                 i.subject AS subject,
                 i.to_email AS sent_to,
                 i.sent_on AS sent_date,
+                i.quote AS quote,
                 pe.id AS reply_id,
                 pe.subject AS reply_subject,
                 pe.sender AS reply_sender,
@@ -1146,6 +1158,7 @@ def fetch_inquiry_replies(inquiry_id):
                 'id': row['id'],
                 'subject': row['subject'],
                 'sent_to': row['sent_to'],
+                'quote': row['quote'],
                 'sent_date': row['sent_date'].isoformat() if row['sent_date'] else None,
                 'replied': 'Yes' if row['reply_id'] else 'No',
                 'reply_received_on': row['reply_date'].isoformat() if row['reply_date'] else 'Not Applicable',
@@ -1157,25 +1170,6 @@ def fetch_inquiry_replies(inquiry_id):
     except Exception as e:
         print(f"Error in fetch_inquiry_replies: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-
-# !/usr/bin/env python3
-import psycopg2
-import uuid
-from argon2 import PasswordHasher
-from datetime import datetime
-
-
-def get_db_connection():
-    conn = psycopg2.connect(
-        host="pg-3c0f63d9-cleareon.l.aivencloud.com",
-        database="cleareon_db",
-        user="avnadmin",
-        password="AVNS_mPoJaHeUZxZjg-eWQ_p",
-        port="22635",
-        sslmode="require"
-    )
-    return conn
 
 
 def setup_admin():

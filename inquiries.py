@@ -122,16 +122,18 @@ def fetch_freight_inquiries():
         cursor = conn.cursor()
         query = """
         SELECT 
-            id.id, 
-            id.sent_on, 
-            id.subject, 
-            id.distribution_name, 
-            id.sent_to, 
-            COALESCE(reply_count.responses_received, 0) as responses_received,
-            id.lowest_quote, 
-            id.status
+        id.id, 
+        id.sent_on, 
+        id.subject, 
+        id.distribution_name, 
+        id.sent_to, 
+        COALESCE(reply_count.responses_received, 0) as responses_received,
+        MIN(ies.quote) as quote,   -- Get the minimum quote for each inquiry
+        id.status
         FROM 
             inquiry_details id
+        JOIN 
+            inquiry_emails_sent ies ON ies.inquiry_id = id.id
         LEFT JOIN (
             SELECT 
                 inquiry_id, 
@@ -143,8 +145,10 @@ def fetch_freight_inquiries():
             GROUP BY 
                 inquiry_id
         ) reply_count ON id.id = reply_count.inquiry_id
+        GROUP BY 
+            id.id, id.sent_on, id.subject, id.distribution_name, id.sent_to, reply_count.responses_received, id.status
         ORDER BY 
-            id.sent_on DESC
+            id.sent_on DESC;
         """
 
         cursor.execute(query)

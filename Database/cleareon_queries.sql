@@ -16,8 +16,6 @@ CREATE TABLE inquiry_details (
     distribution_name VARCHAR(100) NOT NULL,
 	sent_to INTEGER DEFAULT 0,
 	status  VARCHAR(100) NOT NULL,
-    responses_received INTEGER DEFAULT 0,
-    lowest_quote DECIMAL(10, 2),
 	mail_content TEXT
 );
 
@@ -88,6 +86,7 @@ CREATE TABLE IF NOT EXISTS public.inquiry_emails_sent
     id SERIAL PRIMARY KEY,
     inquiry_id integer NOT NULL,
 	message_id TEXT,
+    quote integer,
     sent_on timestamp without time zone NOT NULL,
     subject text COLLATE pg_catalog."default" NOT NULL,
     to_email text COLLATE pg_catalog."default" NOT NULL,
