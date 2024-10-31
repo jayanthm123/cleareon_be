@@ -1,10 +1,10 @@
 import smtplib
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import timezone, timedelta
 from flask import Flask, request, jsonify
 import imaplib
 import email
-from flask_jwt_extended import jwt_required, get_jwt_identity, JWTManager, create_access_token
+from flask_jwt_extended import JWTManager
 from psycopg2 import sql
 from email.header import decode_header
 from flask_cors import CORS
