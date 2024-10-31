@@ -1047,6 +1047,11 @@ def test_route():
     return jsonify({"message": "API is working!"})
 
 
+@app.route('/')
+def health_check():
+    return {"status": "healthy"}
+
+
 #if __name__ == '__main__':
     # setup_admin()
 #    app.run(debug=True, use_reloader=False, threaded=False)
