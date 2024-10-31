@@ -1042,6 +1042,14 @@ def delete_permission(permission_id):
     return jsonify({"message": "Permission deleted successfully"})
 
 
-if __name__ == '__main__':
+@app.route('/api/test', methods=['GET'])
+def test_route():
+    return jsonify({"message": "API is working!"})
+
+
+#if __name__ == '__main__':
     # setup_admin()
-    app.run(debug=True, use_reloader=False, threaded=False)
+#    app.run(debug=True, use_reloader=False, threaded=False)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
