@@ -62,7 +62,7 @@ app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 
 # Enable CORS
-CORS(app)
+CORS(app, supports_credentials=True)
 
 
 # Database connection
@@ -897,7 +897,6 @@ def delete_user(user_id):
 def get_roles():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    print('I am being called')
     try:
         # Get roles with their permissions
         cur.execute("""
@@ -915,7 +914,6 @@ def get_roles():
             ORDER BY r.role_id
         """)
         roles = [dict(row) for row in cur.fetchall()]
-        print(roles)
         return jsonify(roles)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

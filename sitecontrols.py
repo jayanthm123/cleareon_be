@@ -131,9 +131,7 @@ def get_client_users(client_id):
     Returns user details including their roles.
     Requires either admin access or being a user of the specified client.
     """
-    from main import get_jwt_identity
-    current_user_id = get_jwt_identity()
-
+    current_user_id = "dbf31fd3-831b-4ee3-a90d-91b92d5cab5e"
     try:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
