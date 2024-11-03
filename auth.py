@@ -242,7 +242,7 @@ def login():
         }
 
         access_token = create_access_token(identity=user_identity)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
 
         create_user_session(user_id, access_token, expires_at)
 
@@ -329,7 +329,8 @@ def logout():
         with conn.cursor() as cursor:
             query = """
                 UPDATE user_sessions 
-                SET is_revoked = TRUE 
+                SET is_revoked = TRUE,
+                expires_at = CURRENT_TIMESTAMP 
                 WHERE user_id = %s 
                 AND token = %s
             """

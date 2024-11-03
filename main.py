@@ -7,7 +7,7 @@ import email
 from flask_jwt_extended import JWTManager
 from psycopg2 import sql
 from email.header import decode_header
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -22,6 +22,7 @@ from flask_limiter.util import get_remote_address
 from utilities import utilities_bp
 from inquiries import inquiries_bp
 from sitecontrols import sitecontrol_bp
+from emails import emails_bp
 from auth import auth_bp
 import psycopg2
 import uuid
@@ -34,6 +35,7 @@ app.register_blueprint(utilities_bp, url_prefix='/')
 app.register_blueprint(inquiries_bp, url_prefix='/')
 app.register_blueprint(sitecontrol_bp, url_prefix='/')
 app.register_blueprint(auth_bp, url_prefix='/')
+app.register_blueprint(emails_bp, url_prefix='/')
 
 # Configuration
 app.config['JWT_SECRET_KEY'] = 'your-super-secret-key'  # Change this in production!
@@ -190,121 +192,6 @@ def update_email_template(id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-@app.route('/store_distribution_list', methods=['POST'])
-def store_distribution_list():
-    try:
-        data = request.get_json()
-        name = data.get('name')
-        emails = data.get('emails')
-        ccEmails = data.get('ccEmails')
-
-        # Validate the required fields
-        if not name or not emails or not isinstance(emails, list):
-            return jsonify({"error": "Name and a list of emails are required"}), 400
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        query = sql.SQL(
-            "INSERT INTO distribution_lists (name, emails, ccEmails, created_at) VALUES (%s, %s, %s, %s) RETURNING id")
-        cursor.execute(query, (name, emails, ccEmails, datetime.now()))
-        new_id = cursor.fetchone()[0]
-        conn.commit()
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify(
-            {"message": "Distribution list created successfully!", "id": new_id, "name": name, "emails": emails,
-             "ccEmails": ccEmails}), 201
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
-
-
-# New route to fetch all distribution lists
-@app.route('/fetch_distribution_lists', methods=['GET'])
-def fetch_distribution_lists():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Query to fetch all distribution lists
-        cursor.execute("SELECT id, name, emails ,ccEmails FROM distribution_lists")
-        lists = cursor.fetchall()
-
-        # Format the data into a dictionary
-        lists_data = []
-        for list_item in lists:
-            lists_data.append({
-                'id': list_item[0],
-                'name': list_item[1],
-                'emails': list_item[2],
-                'ccEmails': list_item[3]
-            })
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify(lists_data), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/update_distribution_list/<int:id>', methods=['PUT'])
-def update_distribution_list(id):
-    try:
-        data = request.get_json()
-        name = data.get('name')
-        emails = data.get('emails')
-        ccEmails = data.get('ccEmails')
-
-        # Validate the required fields
-        if not name and not emails and not ccEmails:
-            return jsonify(
-                {"error": "At least one of the fields (name, emails, ccEmails) must be provided to update"}), 400
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Create dynamic SQL update query
-        update_fields = []
-        update_values = []
-
-        if name:
-            update_fields.append(sql.SQL("name = %s"))
-            update_values.append(name)
-        if emails:
-            update_fields.append(sql.SQL("emails = %s"))
-            update_values.append(emails)
-        if ccEmails:
-            update_fields.append(sql.SQL("ccEmails = %s"))
-            update_values.append(ccEmails)
-
-        # Add id to the values for the WHERE clause
-        update_values.append(id)
-
-        query = sql.SQL("UPDATE distribution_lists SET {} WHERE id = %s").format(sql.SQL(", ").join(update_fields))
-
-        cursor.execute(query, update_values)
-        conn.commit()
-
-        # Check if any row was updated
-        if cursor.rowcount == 0:
-            return jsonify({"error": "Distribution list not found"}), 404
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify({"message": "Distribution list updated successfully!"}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/send_email_generic', methods=['POST'])  # use this to send general email later if required
@@ -1050,8 +937,8 @@ def health_check():
     return {"status": "healthy"}
 
 
-#if __name__ == '__main__':
-    # setup_admin()
+# if __name__ == '__main__':
+# setup_admin()
 #    app.run(debug=True, use_reloader=False, threaded=False)
 
 if __name__ == '__main__':
