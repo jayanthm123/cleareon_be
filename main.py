@@ -1,24 +1,14 @@
-import smtplib
-import time
 from datetime import timezone, timedelta
 from flask import Flask, request, jsonify
 import imaplib
 import email
 from flask_jwt_extended import JWTManager
-from psycopg2 import sql
-from email.header import decode_header
 from flask_cors import CORS, cross_origin
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 from psycopg2._json import Json
-from email.utils import parsedate_to_datetime, make_msgid
 from psycopg2.extras import DictCursor
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from utilities import utilities_bp
 from inquiries import inquiries_bp
 from sitecontrols import sitecontrol_bp
@@ -43,14 +33,32 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=1)
 app.config['MAX_LOGIN_ATTEMPTS'] = 5
 app.config['LOGIN_ATTEMPT_TIMEOUT'] = 300  # 5 minutes in seconds
 
+
+app.config['SECRET_KEY'] = 'your-secure-secret-key'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='None',  # Required for cross-origin requests
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)
+)
+
+
+app.config.update(
+    SECRET_KEY='your-secret-key-here',  # Replace with a real secret key
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=60),
+    SESSION_COOKIE_SECURE=True,  # For HTTPS
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax'
+)
+
+
 # Initialize extensions
 jwt = JWTManager(app)
-ph = PasswordHasher()
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    storage_uri="memory://"  # Using in-memory storage for rate limiting
-)
 
 # Configure logging
 if not os.path.exists('logs'):
@@ -78,346 +86,6 @@ def get_db_connection():
         sslmode="require"
     )
     return conn
-
-
-@app.route('/store_email_template', methods=['POST'])
-def create_template():
-    try:
-        # Get JSON data from the request
-        data = request.get_json()
-        name = data['name']
-        subject = data['subject']
-        content = data['content']
-
-        # Validate the required fields
-        if not name or not subject or not content:
-            return jsonify({"error": "All fields (name, subject, content) are required"}), 400
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        query = sql.SQL("INSERT INTO email_templates (name, subject, content, created_at) VALUES (%s, %s, %s, %s)")
-        cursor.execute(query, (name, subject, content, datetime.now()))
-        conn.commit()
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify({"message": "Template created successfully!"}), 201
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/fetch_email_templates', methods=['GET'])
-def fetch_email_templates():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Query to fetch all email templates
-        cursor.execute("SELECT id, name, subject, content FROM email_templates")
-        templates = cursor.fetchall()
-
-        # Format the data into a dictionary
-        templates_data = []
-        for template in templates:
-            templates_data.append({
-                'id': template[0],
-                'name': template[1],
-                'subject': template[2],
-                'content': template[3]
-            })
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify(templates_data), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# Update email template route
-@app.route('/update_email_template/<int:id>', methods=['PUT'])
-def update_email_template(id):
-    try:
-        data = request.get_json()
-        name = data.get('name')
-        subject = data.get('subject')
-        content = data.get('content')
-
-        # Validate the required fields
-        if not name and not subject and not content:
-            return jsonify(
-                {"error": "At least one of the fields (name, subject, content) must be provided to update"}), 400
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Create dynamic SQL update query
-        update_fields = []
-        update_values = []
-
-        if name:
-            update_fields.append(sql.SQL("name = %s"))
-            update_values.append(name)
-        if subject:
-            update_fields.append(sql.SQL("subject = %s"))
-            update_values.append(subject)
-        if content:
-            update_fields.append(sql.SQL("content = %s"))
-            update_values.append(content)
-
-        # Add id to the values for the WHERE clause
-        update_values.append(id)
-
-        query = sql.SQL("UPDATE email_templates SET {} WHERE id = %s").format(sql.SQL(", ").join(update_fields))
-
-        cursor.execute(query, update_values)
-        conn.commit()
-
-        # Check if any row was updated
-        if cursor.rowcount == 0:
-            return jsonify({"error": "Template not found"}), 404
-
-        # Close the connection
-        cursor.close()
-        conn.close()
-
-        return jsonify({"message": "Template updated successfully!"}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-
-@app.route('/send_email_generic', methods=['POST'])  # use this to send general email later if required
-def send_email_():
-    try:
-        data = request.get_json()
-        subject = data.get('subject')
-        body = data.get('body')
-        sender_email = data.get('sender_email')
-        sender_password = data.get('sender_password')
-        distribution_list_id = data.get('distribution_list_id')
-        attachments = data.get('attachments', [])  # List of file paths
-
-        # Validate required fields
-        if not all([subject, body, sender_email, sender_password, distribution_list_id]):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        # Fetch the distribution list
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, emails, ccEmails FROM distribution_lists WHERE id = %s", (distribution_list_id,))
-        result = cursor.fetchone()
-        if not result:
-            return jsonify({"error": "Distribution list not found"}), 404
-
-        distribution_name, to_emails, cc_emails = result
-
-        # Create the email
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = ', '.join(to_emails)
-        if cc_emails:
-            msg['Cc'] = ', '.join(cc_emails)
-        msg['Subject'] = subject
-
-        # Attach the body
-        msg.attach(MIMEText(body, 'html'))
-
-        # Attach files
-        for attachment in attachments:
-            with open(attachment, "rb") as file:
-                part = MIMEApplication(file.read(), Name=os.path.basename(attachment))
-            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment)}"'
-            msg.attach(part)
-
-        # Send the email
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:  # Adjust SMTP server as needed
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-
-        return jsonify({"message": "Email sent successfully!"}), 200
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
-
-
-def insert_failed_email(conn, inquiry_id, tried_on, subject, to_email, cc, mail_content):
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO failed_emails (inquiry_id, tried_on, subject, to_email, cc, mail_content)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (inquiry_id, tried_on, subject, to_email, cc, mail_content))
-    conn.commit()
-
-
-def insert_inquiry_emails_sent(conn, inquiry_id, message_id, sent_on, subject, to_email, cc):
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO inquiry_emails_sent (inquiry_id, message_id, sent_on, subject, to_email, cc)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (inquiry_id, message_id, sent_on, subject, to_email, cc))
-    conn.commit()
-
-
-@app.route('/send_email', methods=['POST'])
-def send_email():
-    try:
-        data = request.get_json()
-        subject = data.get('subject')
-        body = data.get('body')
-        sender_email = data.get('sender_email')
-        sender_password = data.get('sender_password')
-        distribution_list_id = data.get('distribution_list_id')
-        inquiry_id = data.get('inquiry_id')
-        attachments = data.get('attachments', [])  # List of file paths
-        wait_time = data.get('wait_time', 1)  # Default wait time of 1 second
-
-        # Validate required fields
-        if not all([subject, body, sender_email, sender_password, distribution_list_id, inquiry_id]):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        # Fetch the distribution list
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        print("step 1")
-        cursor.execute("SELECT name, emails, ccEmails FROM distribution_lists WHERE id = %s", (distribution_list_id,))
-        result = cursor.fetchone()
-        if not result:
-            return jsonify({"error": "Distribution list not found"}), 404
-
-        distribution_name, to_emails, cc_emails = result
-
-        # Create SMTP connection
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:  # Adjust SMTP server as needed
-            server.login(sender_email, sender_password)
-
-            successful_sends = 0
-            failed_sends = 0
-
-            # Send individual emails to each recipient in the To list
-            for to_email in to_emails:
-                msg = MIMEMultipart()
-                msg['From'] = sender_email
-                msg['To'] = to_email
-                if cc_emails:
-                    msg['Cc'] = ', '.join(cc_emails)
-                msg['Subject'] = subject
-                msg['Message-ID'] = make_msgid(domain=sender_email.split('@')[1])
-                # Attach the body
-                msg.attach(MIMEText(body, 'html'))
-
-                # Attach files
-                for attachment in attachments:
-                    with open(attachment, "rb") as file:
-                        part = MIMEApplication(file.read(), Name=os.path.basename(attachment))
-                    part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment)}"'
-                    msg.attach(part)
-
-                recipients = [to_email] + cc_emails if cc_emails else [to_email]
-
-                # Attempt to send email with retries
-                send_success = False
-                for attempt in range(3):  # 3 attempts: initial + 2 retries
-                    try:
-                        server.send_message(msg, to_addrs=recipients)
-                        send_success = True
-                        message_id = msg['Message-ID']
-                        successful_sends += 1
-                        print(message_id)
-                        insert_inquiry_emails_sent(
-                            conn,
-                            inquiry_id,
-                            message_id,
-                            datetime.now(),
-                            subject,
-                            to_email,
-                            ', '.join(cc_emails) if cc_emails else None
-                        )
-                        break
-                    except Exception as e:
-                        print(f"Attempt {attempt + 1} failed: {str(e)}")
-                        if attempt < 2:  # Don't sleep after the last attempt
-                            time.sleep(15 if attempt == 0 else 30)
-
-                if not send_success:
-                    failed_sends += 1
-                    # Log failed email
-                    insert_failed_email(
-                        conn,
-                        inquiry_id,
-                        datetime.now(),
-                        subject,
-                        to_email,
-                        ', '.join(cc_emails) if cc_emails else None,
-                        body
-                    )
-
-                # Wait before sending the next email
-                time.sleep(wait_time)
-
-        conn.close()
-        return jsonify({
-            "message": f"Email sending completed. Successful: {successful_sends}, Failed: {failed_sends}"
-        }), 200
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 500
-
-
-def parse_email(msg):
-    subject = decode_header(msg["Subject"])[0][0]
-    if isinstance(subject, bytes):
-        subject = subject.decode()
-
-    sender = msg["From"]
-    recipient = msg["To"]
-    cc = msg.get("Cc", "").split(",") if msg.get("Cc") else []
-    bcc = msg.get("Bcc", "").split(",") if msg.get("Bcc") else []
-
-    # Use email.utils.parsedate_to_datetime for more flexible date parsing
-    received_date = parsedate_to_datetime(msg["Date"])
-
-    body_text = ""
-    body_html = ""
-    attachments = []
-
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                body_text += part.get_payload(decode=True).decode(errors='replace')
-            elif part.get_content_type() == "text/html":
-                body_html += part.get_payload(decode=True).decode(errors='replace')
-            elif part.get_content_disposition() == 'attachment':
-                attachments.append({
-                    'filename': part.get_filename(),
-                    'content_type': part.get_content_type(),
-                    'size': len(part.get_payload(decode=True))
-                })
-    else:
-        body_text = msg.get_payload(decode=True).decode(errors='replace')
-
-    return {
-        'message_id': msg["Message-ID"],
-        'subject': subject,
-        'sender': sender,
-        'recipient': recipient,
-        'cc': cc,
-        'bcc': bcc,
-        'received_date': received_date,
-        'body_text': body_text,
-        'body_html': body_html,
-        'headers': dict(msg.items()),
-        'attachments': attachments
-    }
 
 
 def get_client_config(client_id, client_account_id, config_key):
@@ -934,7 +602,7 @@ def test_route():
 
 @app.route('/')
 def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy, new comment"}
 
 
 # if __name__ == '__main__':

@@ -1,9 +1,5 @@
-import os
 import psycopg2
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import (
-    jwt_required, get_jwt_identity, create_access_token, JWTManager, get_jwt
-)
+from flask import Blueprint, request, jsonify, session
 from datetime import datetime, timezone, timedelta
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -25,14 +21,6 @@ limiter = Limiter(
     storage_uri="memory://"
 )
 
-# Load sensitive information from environment variables
-DB_HOST = os.getenv("DB_HOST")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_PORT = os.getenv("DB_PORT")
-JWT_SECRET = os.getenv("JWT_SECRET")
-
 
 def get_db_connection():
     conn = psycopg2.connect(
@@ -46,64 +34,31 @@ def get_db_connection():
     return conn
 
 
-def check_active_session(fn):
-    @wraps(fn)
-    @jwt_required()
-    def wrapper(*args, **kwargs):
-        user_identity = get_jwt_identity()
-        user_id = user_identity['user_id']
+def check_session(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'error': 'Please login to continue'}), 401
 
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            query = """
-                SELECT is_revoked 
-                FROM user_sessions 
-                WHERE user_id = %s 
-                AND token = %s
-            """
-            cursor.execute(query, (user_id, get_jwt()["jti"]))  # Uses JTI as token ID
-            session = cursor.fetchone()
-            if session and session[0]:  # If is_revoked is True
-                return jsonify({'error': 'Session has been revoked, please log in again.'}), 401
-        return fn(*args, **kwargs)
+        # Verify session is still valid by checking client term date
+        client_id = session.get('client_id')
+        if client_id and not check_client_term_date(client_id):
+            session.clear()
+            return jsonify({'error': 'Session expired'}), 401
 
-    return wrapper
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
-def has_active_session(user_id):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            query = """
-                SELECT 1
-                FROM user_sessions 
-                WHERE user_id = %s 
-                AND (is_revoked = FALSE OR 
-                expires_at > CURRENT_TIMESTAMP) 
-            """
-            cursor.execute(query, (user_id,))
-            return cursor.fetchone() is not None
-    finally:
-        conn.close()
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'role' not in session or session['role'] != 'admin':
+            return jsonify({'error': 'Admin privileges required'}), 403
+        return f(*args, **kwargs)
 
-
-def get_user_permissions(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    query = sql.SQL("""
-        SELECT DISTINCT p.permission_name 
-        FROM permissions p 
-        JOIN role_permissions rp ON p.permission_id = rp.permission_id 
-        JOIN users u ON u.role_id = rp.role_id 
-        WHERE u.user_id = %s
-    """)
-    try:
-        cursor.execute(query, (user_id,))
-        result = cursor.fetchall()
-        return [row[0] for row in result]
-    finally:
-        cursor.close()
-        conn.close()
+    return decorated_function
 
 
 def check_client_term_date(client_id):
@@ -121,65 +76,23 @@ def check_client_term_date(client_id):
         conn.close()
 
 
-def create_user_session(user_id, token, expires_at):
+def get_user_permissions(user_id):
     conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        with conn.cursor() as cursor:
-            query = """
-                INSERT INTO user_sessions (session_id, user_id, token, expires_at)
-                VALUES (gen_random_uuid(), %s, %s, %s)
-                RETURNING session_id
-            """
-            cursor.execute(query, (user_id, token, expires_at))
-            session_id = cursor.fetchone()[0]
-            conn.commit()
-            return session_id
+        query = sql.SQL("""
+            SELECT DISTINCT p.permission_name 
+            FROM permissions p 
+            JOIN role_permissions rp ON p.permission_id = rp.permission_id 
+            JOIN users u ON u.role_id = rp.role_id 
+            WHERE u.user_id = %s
+        """)
+        cursor.execute(query, (user_id,))
+        result = cursor.fetchall()
+        return [row[0] for row in result]
     finally:
+        cursor.close()
         conn.close()
-
-
-def validate_session(token):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            query = """
-                SELECT user_id
-                FROM user_sessions 
-                WHERE token = %s 
-                AND is_revoked = FALSE 
-                AND expires_at > CURRENT_TIMESTAMP
-            """
-            cursor.execute(query, (token,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-    finally:
-        conn.close()
-
-
-def invalidate_user_sessions(user_id):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            query = """
-                UPDATE user_sessions 
-                SET is_revoked = TRUE 
-                WHERE user_id = %s AND is_revoked = FALSE
-            """
-            cursor.execute(query, (user_id,))
-            conn.commit()
-    finally:
-        conn.close()
-
-
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        current_user = get_jwt_identity()
-        if not current_user or current_user.get('role') != 'admin':
-            return jsonify({'error': 'Admin privileges required'}), 403
-        return f(*args, **kwargs)
-
-    return decorated_function
 
 
 @auth_bp.route('/login', methods=['POST'])
@@ -190,7 +103,6 @@ def login():
         data = request.get_json()
         username = data.get('username')
         password = data.get('password')
-        override_session = data.get('override_session', False)
 
         if not username or not password:
             return jsonify({'error': 'Missing credentials'}), 400
@@ -217,38 +129,43 @@ def login():
         except VerifyMismatchError:
             return jsonify({'error': 'Invalid credentials'}), 401
 
+        # Check client term date
         if not check_client_term_date(client_id):
             return jsonify({'error': 'Account expired'}), 403
 
-        if has_active_session(user_id) and not override_session:
-            return jsonify({
-                'message': 'User already logged in on another device. Do you want to log in here instead?',
-                'user_id': user_id
-            }), 409
-
-        if override_session:
-            invalidate_user_sessions(user_id)
-
+        # Get permissions
         permissions = get_user_permissions(user_id)
 
-        user_identity = {
-            'user_id': str(user_id),
-            'username': username,
-            'email': email,
-            'role': role_name,
-            'client_id': str(client_id),
-            'company_name': company_name,
-            'permissions': permissions
-        }
+        # Set session data
+        session.permanent = True  # Uses app.permanent_session_lifetime
+        session['user_id'] = str(user_id)
+        session['username'] = username
+        session['email'] = email
+        session['role'] = role_name
+        session['client_id'] = str(client_id)
+        session['company_name'] = company_name
+        session['permissions'] = permissions
+        session['login_time'] = datetime.now(timezone.utc).isoformat()
 
-        access_token = create_access_token(identity=user_identity)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
-
-        create_user_session(user_id, access_token, expires_at)
+        # Update last login timestamp
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = %s",
+                (user_id,)
+            )
+            conn.commit()
 
         return jsonify({
-            'access_token': access_token,
-            'user': user_identity
+            'message': 'Login successful',
+            'user': {
+                'user_id': str(user_id),
+                'username': username,
+                'email': email,
+                'role': role_name,
+                'client_id': str(client_id),
+                'company_name': company_name,
+                'permissions': permissions
+            }
         }), 200
 
     except Exception as e:
@@ -259,96 +176,54 @@ def login():
             conn.close()
 
 
-@auth_bp.route('/extend-session', methods=['POST'])
-@jwt_required()
-def extend_token():
-    conn = None
-    try:
-        user_identity = get_jwt_identity()
-        user_id = user_identity['user_id']
-
-        # Check if the current session is still active
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            query = """
-                SELECT is_revoked, expires_at
-                FROM user_sessions
-                WHERE user_id = %s AND token = %s
-            """
-            cursor.execute(query, (user_id, get_jwt()["jti"]))
-            session = cursor.fetchone()
-
-            if not session:
-                return jsonify({'error': 'Session not found or invalid'}), 401
-
-            is_revoked, expires_at = session
-            if is_revoked or datetime.now(timezone.utc) > expires_at:
-                return jsonify({'error': 'Session has expired or been revoked'}), 401
-
-            # Generate a new token with extended expiration
-            new_access_token = create_access_token(identity=user_identity)
-            new_expires_at = datetime.now(timezone.utc) + timedelta(minutes=1)
-
-            # Update the session's expiration in the database
-            update_query = """
-                UPDATE user_sessions
-                SET expires_at = %s, token = %s
-                WHERE user_id = %s AND token = %s
-            """
-            cursor.execute(update_query, (new_expires_at, new_access_token, user_id, get_jwt()["jti"]))
-            conn.commit()
-
-            return jsonify({
-                'access_token': new_access_token,
-                'expires_at': new_expires_at.isoformat()
-            }), 200
-
-    except Exception as e:
-        logging.error(f"Error extending token: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
 @auth_bp.route('/logout', methods=['POST'])
-@jwt_required()
 def logout():
-    print('logging out for user')
-    conn = None
+    session.clear()
+    return jsonify({'message': 'Successfully logged out'}), 200
+
+
+@auth_bp.route('/check-auth', methods=['GET'])
+@check_session
+def check_auth():
+    return jsonify({
+        'authenticated': True,
+        'user': {
+            'user_id': session['user_id'],
+            'username': session['username'],
+            'email': session['email'],
+            'role': session['role'],
+            'client_id': session['client_id'],
+            'company_name': session['company_name'],
+            'permissions': session['permissions']
+        }
+    }), 200
+
+
+@auth_bp.route('/extend-session', methods=['POST'])
+@check_session
+def extend_session():
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or 'Bearer' not in auth_header:
-            return jsonify({'error': 'Missing token'}), 401
+        # Verify the client's term date hasn't expired
+        client_id = session.get('client_id')
+        if not check_client_term_date(client_id):
+            session.clear()
+            return jsonify({'error': 'Account expired'}), 403
 
-        token = auth_header.split(' ')[1]
-        user_identity = get_jwt_identity()
-        user_id = user_identity['user_id']
+        # Update session login time
+        session['login_time'] = datetime.now(timezone.utc).isoformat()
 
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            query = """
-                UPDATE user_sessions 
-                SET is_revoked = TRUE,
-                expires_at = CURRENT_TIMESTAMP 
-                WHERE user_id = %s 
-                AND token = %s
-            """
-            cursor.execute(query, (user_id, token))
-        conn.commit()
-
-        return jsonify({'message': 'Successfully logged out'}), 200
+        return jsonify({
+            'message': 'Session extended successfully',
+            'login_time': session['login_time']
+        }), 200
 
     except Exception as e:
-        logging.error(f"Logout error: {str(e)}")
+        logging.error(f"Error extending session: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
-    finally:
-        if conn:
-            conn.close()
 
 
 @auth_bp.route('/hash-password', methods=['POST'])
-@jwt_required()
+@check_session
 @admin_required
 def hash_password():
     data = request.get_json()
