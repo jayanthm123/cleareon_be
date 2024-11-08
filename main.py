@@ -2,7 +2,6 @@ from datetime import timezone, timedelta
 from flask import Flask, request, jsonify
 import imaplib
 import email
-from flask_jwt_extended import JWTManager
 from flask_cors import CORS, cross_origin
 import os
 import logging
@@ -28,37 +27,13 @@ app.register_blueprint(auth_bp, url_prefix='/')
 app.register_blueprint(emails_bp, url_prefix='/')
 
 # Configuration
-app.config['JWT_SECRET_KEY'] = 'your-super-secret-key'  # Change this in production!
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=1)
-app.config['MAX_LOGIN_ATTEMPTS'] = 5
-app.config['LOGIN_ATTEMPT_TIMEOUT'] = 300  # 5 minutes in seconds
-
 
 app.config['SECRET_KEY'] = 'your-secure-secret-key'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
-app.config['SESSION_COOKIE_SECURE'] = True
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-
-app.config.update(
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='None',  # Required for cross-origin requests
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)
-)
-
-
-app.config.update(
-    SECRET_KEY='your-secret-key-here',  # Replace with a real secret key
-    PERMANENT_SESSION_LIFETIME=timedelta(minutes=60),
-    SESSION_COOKIE_SECURE=True,  # For HTTPS
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax'
-)
-
-
-# Initialize extensions
-jwt = JWTManager(app)
+app.config['SESSION_COOKIE_SECURE'] = True        # Ensures cookies are only sent over HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True      # Prevents JavaScript access to cookies
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'    # Allows cross-site cookies
+app.config['SESSION_COOKIE_PATH'] = '/'           # Ensures the cookie is available on all routes
 
 # Configure logging
 if not os.path.exists('logs'):
@@ -72,8 +47,13 @@ app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 
 # Enable CORS
-CORS(app, supports_credentials=True)
-
+CORS(
+    app,
+    supports_credentials=True,
+    origins=['http://localhost:3000'],  # Your frontend URL
+    methods=['GET', 'POST'],
+    allow_headers=['Content-Type', 'Authorization']
+)
 
 # Database connection
 def get_db_connection():
