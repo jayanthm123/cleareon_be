@@ -30,10 +30,10 @@ app.register_blueprint(emails_bp, url_prefix='/')
 
 app.config['SECRET_KEY'] = 'your-secure-secret-key'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
-app.config['SESSION_COOKIE_SECURE'] = True        # Ensures cookies are only sent over HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True      # Prevents JavaScript access to cookies
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'    # Allows cross-site cookies
-app.config['SESSION_COOKIE_PATH'] = '/'           # Ensures the cookie is available on all routes
+app.config['SESSION_COOKIE_SECURE'] = True  # Ensures cookies are only sent over HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevents JavaScript access to cookies
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Allows cross-site cookies
+app.config['SESSION_COOKIE_PATH'] = '/'  # Ensures the cookie is available on all routes
 
 # Configure logging
 if not os.path.exists('logs'):
@@ -50,10 +50,10 @@ app.logger.setLevel(logging.INFO)
 CORS(
     app,
     supports_credentials=True,
-    origins=['http://localhost:3000'],  # Your frontend URL
     methods=['GET', 'POST', 'OPTIONS'],
     allow_headers=['Content-Type', 'Authorization']
 )
+
 
 # Database connection
 def get_db_connection():
