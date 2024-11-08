@@ -51,7 +51,7 @@ CORS(
     app,
     supports_credentials=True,
     origins=['http://localhost:3000'],  # Your frontend URL
-    methods=['GET', 'POST'],
+    methods=['GET', 'POST', 'OPTIONS'],
     allow_headers=['Content-Type', 'Authorization']
 )
 
