@@ -1,3 +1,5 @@
+import email
+import imaplib
 import os
 import smtplib
 import time
@@ -10,7 +12,12 @@ from email.utils import make_msgid, parsedate_to_datetime
 import psycopg2
 from flask import Blueprint, request, jsonify
 from psycopg2 import sql
-from datetime import datetime
+from datetime import datetime, timezone
+from psycopg2._json import Json
+from psycopg2.extras import DictCursor
+
+from AI import get_quote_from_response
+from config import get_tenant_config, update_tenant_config
 
 emails_bp = Blueprint('emails', __name__)
 
@@ -498,3 +505,163 @@ def insert_failed_email(conn, inquiry_id, tried_on, subject, to_email, cc, mail_
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (inquiry_id, tried_on, subject, to_email, cc, mail_content))
     conn.commit()
+
+
+def find_and_store_email_replies():
+    print('starting')
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
+
+        # Fetch all sent inquiry emails
+        cursor.execute("SELECT id, message_id, subject, inquiry_id, to_email FROM emails_inquiry_emails_sent")
+        sent_emails = cursor.fetchall()
+
+        # Fetch all unprocessed emails
+        cursor.execute("SELECT id, headers, subject, sender, body_text FROM emails_inbox WHERE isReplyProcessed = FALSE")
+        processed_emails = cursor.fetchall()
+
+        # Dictionary to store the results
+        replies = {}
+
+        # Set to keep track of all processed email IDs
+        all_processed_ids = set()
+
+        for sent_email in sent_emails:
+            sent_id = sent_email['id']
+            sent_message_id = sent_email['message_id']
+            sent_subject = sent_email['subject']
+            sent_to = sent_email['to_email']
+            inquiry_id = sent_email['inquiry_id']
+
+            for processed_email in processed_emails:
+                processed_id = processed_email['id']
+                headers = processed_email['headers']
+                processed_subject = processed_email['subject']
+                from_addr = processed_email['sender'][
+                            processed_email['sender'].find('<') + 1:processed_email['sender'].find('>')]
+                email_text = processed_email['body_text']
+                # Add this processed email ID to the set of all processed IDs
+                all_processed_ids.add(processed_id)
+
+                # Check if the processed email is a reply to the sent email
+                is_reply = False
+                if 'In-Reply-To' in headers and headers['In-Reply-To'] == sent_message_id:
+                    is_reply = True
+                elif 'References' in headers and sent_message_id in headers['References']:
+                    is_reply = True
+                elif (from_addr == sent_to and processed_subject.lower().startswith('re:') and
+                      processed_subject[3:].strip() == sent_subject.strip()):
+                    is_reply = True
+
+                if is_reply:
+                    replies[sent_id] = processed_id
+                    quote = get_quote_from_response(email_text)
+                    print(quote)
+                    if quote != 'Unable to determine':
+                        cursor.execute("""
+                                        UPDATE emails_inquiry_emails_sent 
+                                        SET quote = %s 
+                                        WHERE id = %s
+                                    """, (quote, sent_id))
+
+        # Update the database with the reply information
+        for sent_id, reply_id in replies.items():
+            cursor.execute("""
+                UPDATE emails_inquiry_emails_sent 
+                SET reply_mail_id = %s 
+                WHERE id = %s
+            """, (reply_id, sent_id))
+
+        # Mark all processed emails as processed, whether they're replies or not
+        for processed_id in all_processed_ids:
+            cursor.execute("""
+                UPDATE emails_inbox 
+                SET isReplyProcessed = TRUE 
+                WHERE id = %s
+            """, (processed_id,))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return f"Processed {len(replies)} replies. Marked {len(all_processed_ids)} emails as processed."
+
+    except Exception as e:
+        print(f"Error in find_and_store_email_replies: {str(e)}")
+        return f"Error: {str(e)}"
+
+
+@emails_bp.route('/fetch_and_store_emails', methods=['POST'])
+def fetch_and_store_emails():
+    try:
+        data = request.json
+        email_address = data.get('email')
+        password = data.get('password')
+        imap_server = data.get('imap_server')
+        imap = imaplib.IMAP4_SSL(imap_server)
+        imap.login(email_address, password)
+        imap.select('INBOX')
+        last_refresh = get_tenant_config('default', 'default', 'last_refresh_datetime')
+        last_refresh = datetime.fromisoformat(last_refresh)
+        search_criterion = f'(SINCE "{last_refresh.strftime("%d-%b-%Y")}")'
+
+        _, messages = imap.search(None, search_criterion)
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        ctr = 0
+        for num in messages[0].split():
+            _, msg_data = imap.fetch(num, '(RFC822)')
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    ctr = ctr + 1
+                    msg = email.message_from_bytes(response_part[1])
+                    email_data = parse_email(msg)
+                    cur.execute("""
+                        INSERT INTO emails_inbox 
+                        (message_id, subject, sender, recipient, cc, bcc, received_date, body_text, body_html, headers, attachments, folder)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (message_id) DO NOTHING
+                    """, (
+                        email_data['message_id'],
+                        email_data['subject'],
+                        email_data['sender'],
+                        email_data['recipient'],
+                        email_data['cc'],
+                        email_data['bcc'],
+                        email_data['received_date'],
+                        email_data['body_text'],
+                        email_data['body_html'],
+                        Json(email_data['headers']),
+                        Json(email_data['attachments']),
+                        'INBOX'
+                    ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        imap.close()
+        imap.logout()
+        update_tenant_config('default', 'default', 'last_refresh_datetime', datetime.now(timezone.utc).isoformat())
+        find_and_store_email_replies()
+        print(f"{ctr} new emails processed")
+        return jsonify({"message": "Emails fetched and stored successfully"}), 200
+
+    except Exception as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+@emails_bp.route('/get_processed_emails', methods=['GET'])
+def get_processed_emails():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=DictCursor)
+        cur.execute("SELECT * FROM emails_inbox ORDER BY received_date DESC")
+        emails = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify([dict(email) for email in emails]), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+

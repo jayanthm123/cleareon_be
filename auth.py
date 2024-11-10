@@ -42,11 +42,11 @@ def check_session(f):
             print("No user_id found in session")
             return jsonify({'error': 'Please login to continue'}), 401
 
-        # Verify if the client term is still valid
-        client_id = session.get('client_id')
-        if client_id:
-            if not check_client_term_date(client_id):
-                print("Client term expired for client_id:", client_id)
+        # Verify if the tenant term is still valid
+        tenant_id = session.get('tenant_id')
+        if tenant_id:
+            if not check_tenant_term_date(tenant_id):
+                print("tenant term expired for tenant_id:", tenant_id)
                 session.clear()
                 return jsonify({'error': 'Session expired'}), 401
 
@@ -65,12 +65,12 @@ def admin_required(f):
     return decorated_function
 
 
-def check_client_term_date(client_id):
+def check_tenant_term_date(tenant_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        query = sql.SQL("SELECT term_date FROM clients WHERE client_id = %s")
-        cursor.execute(query, (client_id,))
+        query = sql.SQL("SELECT term_date FROM tenants WHERE tenant_id = %s")
+        cursor.execute(query, (tenant_id,))
         result = cursor.fetchone()
         if result and result[0]:
             return datetime.now().date() <= result[0]
@@ -114,10 +114,10 @@ def login():
         conn = get_db_connection()
         with conn.cursor() as cursor:
             query = """
-                SELECT u.user_id, u.password_hash, u.client_id, u.email, r.role_name, c.company_name 
+                SELECT u.user_id, u.password_hash, u.tenant_id, u.email, r.role_name, c.tenant_name 
                 FROM users u 
                 JOIN roles r ON u.role_id = r.role_id 
-                JOIN clients c ON u.client_id = c.client_id 
+                JOIN tenants c ON u.tenant_id = c.tenant_id 
                 WHERE u.email = %s
             """
             cursor.execute(query, (username,))
@@ -126,15 +126,15 @@ def login():
         if not result:
             return jsonify({'error': 'Invalid credentials'}), 401
 
-        user_id, password_hash, client_id, email, role_name, company_name = result
+        user_id, password_hash, tenant_id, email, role_name, tenant_name = result
 
         try:
             ph.verify(password_hash, password)
         except VerifyMismatchError:
             return jsonify({'error': 'Invalid credentials'}), 401
 
-        # Check client term date
-        if not check_client_term_date(client_id):
+        # Check tenant term date
+        if not check_tenant_term_date(tenant_id):
             return jsonify({'error': 'Account expired'}), 403
 
         # Get permissions
@@ -146,8 +146,8 @@ def login():
         session['username'] = username
         session['email'] = email
         session['role'] = role_name
-        session['client_id'] = str(client_id)
-        session['company_name'] = company_name
+        session['tenant_id'] = str(tenant_id)
+        session['tenant_name'] = tenant_name
         session['permissions'] = permissions
         session['login_time'] = datetime.now(timezone.utc).isoformat()
 
@@ -166,8 +166,8 @@ def login():
                 'username': username,
                 'email': email,
                 'role': role_name,
-                'client_id': str(client_id),
-                'company_name': company_name,
+                'tenant_id': str(tenant_id),
+                'tenant_name': tenant_name,
                 'permissions': permissions
             }
         }), 200
@@ -196,8 +196,8 @@ def check_auth():
             'username': session['username'],
             'email': session['email'],
             'role': session['role'],
-            'client_id': session['client_id'],
-            'company_name': session['company_name'],
+            'tenant_id': session['tenant_id'],
+            'tenant_name': session['tenant_name'],
             'permissions': session['permissions']
         }
     }), 200
@@ -208,10 +208,10 @@ def check_auth():
 def extend_session():
     print("Extending Session")
     try:
-        # Verify the client's term date hasn't expired
-        client_id = session.get('client_id')
-        print(client_id)
-        if not check_client_term_date(client_id):
+        # Verify the tenant's term date hasn't expired
+        tenant_id = session.get('tenant_id')
+        print(tenant_id)
+        if not check_tenant_term_date(tenant_id):
             session.clear()
             return jsonify({'error': 'Account expired'}), 403
 
