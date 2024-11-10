@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from psycopg2 import sql
 from datetime import datetime
 
+from auth import check_session
 # Import utility functions
 from utilities import get_db_connection
 
@@ -16,33 +17,36 @@ def store_new_inquiry():
         body = data.get('body')
         sender_email = data.get('sender_email')
         mail_content = data.get('mail_content')
-        distribution_list_id = data.get('distribution_list_id')
+        distribution_group = data.get('distribution_group')  # This is the group name (using 'name' column)
 
         # Validate required fields
-        if not all([subject, body, sender_email, distribution_list_id]):
+        if not all([subject, body, sender_email, distribution_group]):
             return jsonify({"error": "Missing required fields"}), 400
 
-        # Fetch the distribution list
+        # Fetch all distribution lists with the given group name (using 'name' column)
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT name, emails, ccEmails FROM distribution_lists WHERE id = %s", (distribution_list_id,))
-        result = cursor.fetchone()
-        if not result:
-            return jsonify({"error": "Distribution list not found"}), 404
+        cursor.execute("""
+            SELECT id, name, emails FROM distribution_lists 
+            WHERE name = %s
+        """, (distribution_group,))
+        lists = cursor.fetchall()
 
-        distribution_name, to_emails, cc_emails = result
-        # Calculate the number of email addresses in the TO list
-        # to_emails_list = to_emails.split(",")
-        total_to_emails = len(to_emails)
+        if not lists:
+            return jsonify({"error": "No distribution lists found for the group"}), 404
 
-        # Insert record into inquiry_details table
+        # Calculate total distribution lists (not individual emails)
+        total_lists = len(lists)
+
+        # Insert a single record into emails_inquiry_summary for the entire group
         insert_query = """
-            INSERT INTO inquiry_details (sent_on, subject, distribution_name, mail_content, responses_received,Status, sent_to)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO emails_inquiry_summary (sent_on, subject, distribution_name, mail_content, Status, sent_to)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
-            """
-        cursor.execute(insert_query,
-                       (datetime.now(), subject, distribution_name, mail_content, 0, "Pending", str(total_to_emails)))
+        """
+        cursor.execute(insert_query, (
+            datetime.now(), subject, distribution_group, mail_content, "Pending", total_lists
+        ))
         new_inquiry_id = cursor.fetchone()[0]
         conn.commit()
 
@@ -64,8 +68,6 @@ def update_inquiry_status(id):
     try:
         data = request.get_json()
         new_status = data.get('status')
-        responses_received = data.get('responses_received')
-        lowest_quote = data.get('lowest_quote')
 
         # Validate required fields
         if not new_status:
@@ -78,18 +80,10 @@ def update_inquiry_status(id):
         update_fields = [sql.SQL("status = %s")]
         update_values = [new_status]
 
-        if responses_received is not None:
-            update_fields.append(sql.SQL("responses_received = %s"))
-            update_values.append(responses_received)
-
-        if lowest_quote is not None:
-            update_fields.append(sql.SQL("lowest_quote = %s"))
-            update_values.append(lowest_quote)
-
         # Add id to the values for the WHERE clause
         update_values.append(id)
 
-        query = sql.SQL("UPDATE inquiry_details SET {} WHERE id = %s RETURNING id").format(
+        query = sql.SQL("UPDATE emails_inquiry_summary SET {} WHERE id = %s RETURNING id").format(
             sql.SQL(", ").join(update_fields))
 
         cursor.execute(query, update_values)
@@ -116,6 +110,7 @@ def update_inquiry_status(id):
 
 
 @inquiries_bp.route('/fetch_freight_inquiries', methods=['GET'])
+@check_session
 def fetch_freight_inquiries():
     try:
         conn = get_db_connection()
@@ -131,15 +126,15 @@ def fetch_freight_inquiries():
         MIN(ies.quote) as quote,   -- Get the minimum quote for each inquiry
         id.status
         FROM 
-            inquiry_details id
+            emails_inquiry_summary id
         JOIN 
-            inquiry_emails_sent ies ON ies.inquiry_id = id.id
+            emails_inquiry_emails_sent ies ON ies.inquiry_id = id.id
         LEFT JOIN (
             SELECT 
                 inquiry_id, 
                 COUNT(reply_mail_id) as responses_received
             FROM 
-                inquiry_emails_sent
+                emails_inquiry_emails_sent
             WHERE 
                 reply_mail_id IS NOT NULL
             GROUP BY 

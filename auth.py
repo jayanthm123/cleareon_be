@@ -37,14 +37,18 @@ def get_db_connection():
 def check_session(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Check if user_id is present in the session
         if 'user_id' not in session:
+            print("No user_id found in session")
             return jsonify({'error': 'Please login to continue'}), 401
 
-        # Verify session is still valid by checking client term date
+        # Verify if the client term is still valid
         client_id = session.get('client_id')
-        if client_id and not check_client_term_date(client_id):
-            session.clear()
-            return jsonify({'error': 'Session expired'}), 401
+        if client_id:
+            if not check_client_term_date(client_id):
+                print("Client term expired for client_id:", client_id)
+                session.clear()
+                return jsonify({'error': 'Session expired'}), 401
 
         return f(*args, **kwargs)
 
@@ -202,9 +206,11 @@ def check_auth():
 @auth_bp.route('/extend-session', methods=['POST'])
 @check_session
 def extend_session():
+    print("Extending Session")
     try:
         # Verify the client's term date hasn't expired
         client_id = session.get('client_id')
+        print(client_id)
         if not check_client_term_date(client_id):
             session.clear()
             return jsonify({'error': 'Account expired'}), 403

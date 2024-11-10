@@ -1,8 +1,8 @@
 from datetime import timezone, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 import imaplib
 import email
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 import os
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,8 +11,8 @@ from psycopg2.extras import DictCursor
 from utilities import utilities_bp
 from inquiries import inquiries_bp
 from sitecontrols import sitecontrol_bp
-from emails import emails_bp
-from auth import auth_bp
+from emails import emails_bp, parse_email
+from auth import auth_bp, check_session
 import psycopg2
 import uuid
 from argon2 import PasswordHasher
@@ -26,33 +26,27 @@ app.register_blueprint(sitecontrol_bp, url_prefix='/')
 app.register_blueprint(auth_bp, url_prefix='/')
 app.register_blueprint(emails_bp, url_prefix='/')
 
-# Configuration
 
-app.config['SECRET_KEY'] = 'your-secure-secret-key'
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
-app.config['SESSION_COOKIE_SECURE'] = True  # Ensures cookies are only sent over HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevents JavaScript access to cookies
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Allows cross-site cookies
-app.config['SESSION_COOKIE_PATH'] = '/'  # Ensures the cookie is available on all routes
-
-# Configure logging
-if not os.path.exists('logs'):
-    os.mkdir('logs')
-file_handler = RotatingFileHandler('logs/app.log', maxBytes=10240, backupCount=10)
-file_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-))
-file_handler.setLevel(logging.INFO)
-app.logger.addHandler(file_handler)
-app.logger.setLevel(logging.INFO)
-
-# Enable CORS
-CORS(
-    app,
-    supports_credentials=True,
-    methods=['GET', 'POST', 'OPTIONS'],
-    allow_headers=['Content-Type', 'Authorization']
+app.config.update(
+    SECRET_KEY='your-secure-secret-key',
+    SESSION_COOKIE_NAME='session_id',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
+    SESSION_TYPE='filesystem',
+    SESSION_COOKIE_SECURE=False,  # Must be False for localhost HTTP
+    SESSION_COOKIE_HTTPONLY=True,
 )
+
+# Updated CORS configuration
+CORS(app,
+     supports_credentials=True,
+     resources={
+         r"/*": {
+             "methods": ["GET", "POST", "PUT", "OPTIONS"],
+             "allow_headers": ["Content-Type", "Authorization", "X-User-ID"],
+             "expose_headers": ["Content-Type", "Authorization"],
+             "supports_credentials": True
+         }
+     })
 
 
 # Database connection
@@ -122,7 +116,7 @@ def fetch_and_store_emails():
                     msg = email.message_from_bytes(response_part[1])
                     email_data = parse_email(msg)
                     cur.execute("""
-                        INSERT INTO processed_emails 
+                        INSERT INTO emails_inbox 
                         (message_id, subject, sender, recipient, cc, bcc, received_date, body_text, body_html, headers, attachments, folder)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (message_id) DO NOTHING
@@ -160,7 +154,7 @@ def get_processed_emails():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=DictCursor)
-        cur.execute("SELECT * FROM processed_emails ORDER BY received_date DESC")
+        cur.execute("SELECT * FROM emails_inbox ORDER BY received_date DESC")
         emails = cur.fetchall()
         cur.close()
         conn.close()
@@ -194,12 +188,11 @@ def find_and_store_email_replies():
         cursor = conn.cursor(cursor_factory=DictCursor)
 
         # Fetch all sent inquiry emails
-        cursor.execute("SELECT id, message_id, subject, inquiry_id, to_email FROM inquiry_emails_sent")
+        cursor.execute("SELECT id, message_id, subject, inquiry_id, to_email FROM emails_inquiry_emails_sent")
         sent_emails = cursor.fetchall()
 
         # Fetch all unprocessed emails
-        cursor.execute("SELECT id, headers, subject, sender, body_text FROM processed_emails WHERE isReplyProcessed = "
-                       "FALSE")
+        cursor.execute("SELECT id, headers, subject, sender, body_text FROM emails_inbox WHERE isReplyProcessed = FALSE")
         processed_emails = cursor.fetchall()
 
         # Dictionary to store the results
@@ -241,7 +234,7 @@ def find_and_store_email_replies():
                     print(quote)
                     if quote != 'Unable to determine':
                         cursor.execute("""
-                                        UPDATE inquiry_emails_sent 
+                                        UPDATE emails_inquiry_emails_sent 
                                         SET quote = %s 
                                         WHERE id = %s
                                     """, (quote, sent_id))
@@ -249,7 +242,7 @@ def find_and_store_email_replies():
         # Update the database with the reply information
         for sent_id, reply_id in replies.items():
             cursor.execute("""
-                UPDATE inquiry_emails_sent 
+                UPDATE emails_inquiry_emails_sent 
                 SET reply_mail_id = %s 
                 WHERE id = %s
             """, (reply_id, sent_id))
@@ -257,7 +250,7 @@ def find_and_store_email_replies():
         # Mark all processed emails as processed, whether they're replies or not
         for processed_id in all_processed_ids:
             cursor.execute("""
-                UPDATE processed_emails 
+                UPDATE emails_inbox 
                 SET isReplyProcessed = TRUE 
                 WHERE id = %s
             """, (processed_id,))
@@ -274,6 +267,7 @@ def find_and_store_email_replies():
 
 
 @app.route('/fetch_inquiry_replies/<int:inquiry_id>', methods=['GET'])
+@check_session  # Add this decorator to require login
 def fetch_inquiry_replies(inquiry_id):
     try:
         conn = get_db_connection()
@@ -293,8 +287,8 @@ def fetch_inquiry_replies(inquiry_id):
                 pe.received_date AS reply_date,
                 pe.body_text AS body_text,
                 pe.body_html AS body_html
-            FROM inquiry_emails_sent i
-            LEFT JOIN processed_emails pe ON pe.id = i.reply_mail_id
+            FROM emails_inquiry_emails_sent i
+            LEFT JOIN emails_inbox pe ON pe.id = i.reply_mail_id
             WHERE i.inquiry_id = %s
             ORDER BY pe.received_date IS NULL, pe.received_date DESC 
         """, (inquiry_id,))
@@ -575,19 +569,27 @@ def delete_permission(permission_id):
     return jsonify({"message": "Permission deleted successfully"})
 
 
-@app.route('/api/test', methods=['GET'])
-def test_route():
-    return jsonify({"message": "API is working!"})
-
-
 @app.route('/')
 def health_check():
-    return {"status": "healthy, new comment"}
+    return {"status": "healthy"}
 
 
-# if __name__ == '__main__':
-# setup_admin()
-#    app.run(debug=True, use_reloader=False, threaded=False)
+@app.route('/api/test-session', methods=['POST'])
+def test_session():
+    try:
+        # Set some session data
+        session['test_key'] = 'test_value'
+        session['timestamp'] = str(datetime.now())
+        session.modified = True
+
+
+        return jsonify({
+            'message': 'Session test successful',
+            'session_data': dict(session)
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
