@@ -21,7 +21,7 @@ def create_client():
             RETURNING client_id
             """,
             (
-                data.get("user_id"), data.get("tenant_id"), data.get("iecNo"), data.get("companyName"),
+                data.get("user_id"), data.get("tenant_id"), data.get("iec_no"), data.get("company_name"),
                 data.get("address1"), data.get("address2"), data.get("city"), data.get("district"),
                 data.get("pinCode"), data.get("state"), data.get("stateCode"),
                 data.get("panNo"), data.get("gstinId"), data.get("importADCode"),
@@ -38,7 +38,7 @@ def create_client():
                 INSERT INTO master_client_contacts (client_id, contact_person, phone_no, email)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (client_id, contact["contactPerson"], contact.get("phoneNo"), contact.get("email"))
+                (client_id, contact["contact_person"], contact.get("phone_no"), contact.get("email"))
             )
 
         conn.commit()
@@ -89,7 +89,7 @@ def update_client(client_id):
                     INSERT INTO master_client_contacts (client_id, contact_person, phone_no, email)
                     VALUES (%s, %s, %s, %s)
                     """,
-                    (client_id, contact["contactPerson"], contact.get("phoneNo"), contact.get("email"))
+                    (client_id, contact["contact_person"], contact.get("phone_no"), contact.get("email"))
                 )
 
         conn.commit()
