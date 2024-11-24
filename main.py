@@ -5,6 +5,7 @@ import os
 from utilities import utilities_bp
 from inquiries import inquiries_bp
 from sitecontrols import sitecontrol_bp
+from jobs import jobs_bp
 from emails import emails_bp
 from auth import auth_bp, check_session
 from mastersetup import master_setup_bp
@@ -19,6 +20,8 @@ app.register_blueprint(sitecontrol_bp, url_prefix='/')
 app.register_blueprint(auth_bp, url_prefix='/')
 app.register_blueprint(emails_bp, url_prefix='/')
 app.register_blueprint(master_setup_bp, url_prefix='/')
+app.register_blueprint(jobs_bp, url_prefix='/')
+
 
 app.config.update(
     SECRET_KEY='your-secure-secret-key',
