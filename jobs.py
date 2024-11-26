@@ -46,6 +46,15 @@ def generate_job_id():
     return f"{base}{sequence:03d}"
 
 
+@jobs_bp.route('/generate-job-id', methods=['GET'])
+def generate_job_id_api():
+    try:
+        job_id = generate_job_id()
+        return jsonify({'jobId': job_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @jobs_bp.route('/import-jobs', methods=['GET'])
 def get_import_jobs():
     try:
