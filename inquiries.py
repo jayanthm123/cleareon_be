@@ -83,7 +83,6 @@ def update_inquiry_status(id):
 
         # Add id to the values for the WHERE clause
         update_values.append(id)
-
         query = sql.SQL("UPDATE emails_inquiry_summary SET {} WHERE id = %s RETURNING id").format(
             sql.SQL(", ").join(update_fields))
 
