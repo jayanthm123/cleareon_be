@@ -111,7 +111,6 @@ def update_inquiry_status(id):
 
 
 @inquiries_bp.route('/fetch_freight_inquiries', methods=['GET'])
-@check_session
 def fetch_freight_inquiries():
     try:
         conn = get_db_connection()
