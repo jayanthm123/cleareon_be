@@ -28,7 +28,7 @@ app.config.update(
     SESSION_COOKIE_NAME='session_id',
     PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
     SESSION_TYPE='filesystem',
-    SESSION_COOKIE_SECURE=False,  # Must be False for localhost HTTP
+    SESSION_COOKIE_SECURE=True,  # Must be False for localhost HTTP
     SESSION_COOKIE_HTTPONLY=True,
 )
 

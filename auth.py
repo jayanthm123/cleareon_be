@@ -49,9 +49,7 @@ def check_session(f):
                 print("tenant term expired for tenant_id:", tenant_id)
                 session.clear()
                 return jsonify({'error': 'Session expired'}), 401
-
         return f(*args, **kwargs)
-
     return decorated_function
 
 
