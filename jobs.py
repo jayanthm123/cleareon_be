@@ -108,7 +108,10 @@ def get_import_jobs():
                 importer_name,
                 iec_no,
                 invoice_number,
-                arrival_date
+                arrival_date,
+                be_type,
+                transport_mode,
+                custom_house
             FROM import_jobs 
             WHERE {where_clause}
             ORDER BY created_date DESC
@@ -177,9 +180,11 @@ def create_import_job():
                 job_id, mode, importer_name, iec_no, ad_code,
                 address_line1, address_line2, city, state, zip_code,
                 origin_country, shipping_country, port_of_origin, port_of_shipment,
-                invoice_number, exporter_name, arrival_date, created_by
+                invoice_number, exporter_name, arrival_date, created_by,
+                be_type, transport_mode, custom_house
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             )
         """, (
             job_id, data.get('mode'), data.get('importer_name'),
@@ -189,7 +194,8 @@ def create_import_job():
             data.get('origin_country'), data.get('shipping_country'),
             data.get('port_of_origin'), data.get('port_of_shipment'),
             data.get('invoice_number'), data.get('exporter_name'),
-            data.get('arrival_date'), data.get('created_by', 'SYSTEM')
+            data.get('arrival_date'), data.get('created_by', 'SYSTEM'),
+            data.get('be_type'), data.get('transport_mode'), data.get('custom_house')
         ))
 
         conn.commit()
@@ -221,7 +227,7 @@ def update_import_job(job_id):
             'address_line1', 'address_line2', 'city', 'state', 'zip_code',
             'origin_country', 'shipping_country', 'port_of_origin',
             'port_of_shipment', 'invoice_number', 'exporter_name',
-            'arrival_date'
+            'arrival_date', 'be_type', 'transport_mode', 'custom_house'
         ]:
             if field in data:
                 update_fields.append(f"{field} = %s")
