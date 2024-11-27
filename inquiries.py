@@ -167,7 +167,7 @@ def fetch_freight_inquiries():
         # Close the connection
         cursor.close()
         conn.close()
-
+        print(len(lists_data), "Returned inquiries")
         return jsonify(lists_data), 200
 
     except Exception as e:
