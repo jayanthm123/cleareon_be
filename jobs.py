@@ -293,3 +293,89 @@ def delete_import_job(job_id):
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@jobs_bp.route('/get_all_clients', methods=['GET'])
+def get_all_clients():
+    try:
+        tenant_id = request.args.get('tenant_id')
+        if not tenant_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'Tenant ID is required',
+                'data': None
+            }), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Main query to fetch all tenant details
+        query = """
+            SELECT 
+                client_id,
+                tenant_id,
+                iec_no,
+                company_name,
+                address1,
+                address2,
+                city,
+                district,
+                pin_code,
+                state,
+                state_code,
+                pan_no,
+                gstin_id,
+                import_ad_code,
+                export_ad_code,
+                created_at,
+                updated_at
+            FROM master_clients 
+            WHERE tenant_id = %s 
+            ORDER BY company_name ASC
+        """
+
+        cur.execute(query, (tenant_id,))
+        tenant_details = cur.fetchall()
+
+        # Get some summary statistics
+        summary_query = """
+            SELECT 
+                DISTINCT CONCAT(company_name,'-', city)
+            FROM master_clients 
+            WHERE tenant_id = %s
+        """
+
+        cur.execute(summary_query, (tenant_id,))
+        summary = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not tenant_details:
+            return jsonify({
+                'status': 'error',
+                'message': f'No data found for tenant {tenant_id}',
+                'data': None,
+                'summary': None
+            }), 404
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Tenant details retrieved successfully',
+            'data': tenant_details,
+            'summary': summary
+        }), 200
+
+    except psycopg2.Error as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Database error: {str(e)}',
+            'data': None
+        }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Unexpected error: {str(e)}',
+            'data': None
+        }), 500
+
